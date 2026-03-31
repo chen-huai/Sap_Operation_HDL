@@ -1,7 +1,5 @@
 import sys, win32com.client, time, datetime, re
 
-from Sap_Operate import *
-
 
 # from PyQt5 import QtCore, QtGui, QtWidgets
 # from PyQt5.QtWidgets import Qself.application, QMainWindow
