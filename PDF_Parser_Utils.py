@@ -19,7 +19,9 @@ PDF解析工具模块
       * 提升对复杂发票格式的兼容性
 """
 
+import os
 import re
+import pdfplumber
 from typing import Optional, Dict
 
 
@@ -373,4 +375,45 @@ def parse_pdf_fields(msg: Dict, line: str, inv_pattern: str = None, order_patter
         match = re.search(order_pattern, line)
         if match:
             msg['Order No'] = match.group(0)
+
+
+# ============ PDF 文件操作 (原 PDF_Operate.py) ============
+
+class PDF_Operate():
+    """PDF文件读取、保存和文件名处理"""
+
+    @staticmethod
+    def readPdf(inputFile):
+        """读取PDF文件并返回按行分割的文本列表"""
+        text = []
+        with pdfplumber.open(inputFile) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text(x_tolerance=2)
+                page_text_list = page_text.split("\n")
+                text += page_text_list
+        return text
+
+    @staticmethod
+    def saveAs(inputFile, outputFile):
+        """将文件复制到新路径"""
+        with open(inputFile, 'rb') as fp1:
+            b1 = fp1.read()
+        with open(outputFile, 'wb') as fp2:
+            fp2.write(b1)
+
+    @staticmethod
+    def sanitize_filename(filename):
+        """
+        将文件名中的非法字符替换为空字符串。
+
+        Parameters:
+            filename (str): 需要处理的文件名字符串。
+
+        Returns:
+            str: 替换非法字符后的文件名字符串。
+        """
+        invalid_chars = '<>:"/\\|?*'
+        for char in invalid_chars:
+            filename = filename.replace(char, '')
+        return filename
 

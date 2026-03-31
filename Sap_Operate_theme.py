@@ -16,9 +16,9 @@ from PyQt5.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox,
 from PyQt5.QtCore import QDate
 from PyQt5.QtGui import QIcon, QFontDatabase
 from Get_Data import *
-from File_Operate import *
-from PDF_Operate import *
-from PDF_Parser_Utils import extract_company_name, extract_revenue, extract_fapiao_no, parse_pdf_fields
+# File_Operate 已合并，方法已内联到 MyMainWindow
+# PDF_Operate 已合并到 PDF_Parser_Utils
+from PDF_Parser_Utils import extract_company_name, extract_revenue, extract_fapiao_no, parse_pdf_fields, PDF_Operate
 from Sap_Function import *
 from Sap_Operate_Ui import Ui_MainWindow
 from Data_Table import *
@@ -1693,14 +1693,13 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                 generalData = newData.fileData[~newData.fileData["Invoices' name (Chinese)"].isin(invoiceName)]
                 # 新文件地址
                 newFolderUrl = '%s/%s' % (filepath, today)
-                newFolder = File_Opetate()
-                newFolder.createFolder(newFolderUrl)
+                self.createFolder(newFolderUrl)
                 ExcelFileType = 'xlsx'
                 if generalData.empty:
                     pass
                 else:
                     invoiceFileName = '1.正常合并'
-                    invoiceFilePath = newFolder.getFileName(newFolderUrl, invoiceFileName, ExcelFileType)
+                    invoiceFilePath = self.getFileName(newFolderUrl, invoiceFileName, ExcelFileType)
                     self.textBrowser_2.append('1:%s' % invoiceFilePath)
                     generalFile = generalData.to_excel('%s' % invoiceFilePath, merge_cells=False)
                 specialData = newData.fileData[newData.fileData["Invoices' name (Chinese)"].isin(invoiceName)]
@@ -1712,7 +1711,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                         pass
                     else:
                         invoiceFileName = str(fileNum) + '.' + each
-                        invoiceFilePath = newFolder.getFileName(newFolderUrl, invoiceFileName, ExcelFileType)
+                        invoiceFilePath = self.getFileName(newFolderUrl, invoiceFileName, ExcelFileType)
                         self.textBrowser_2.append('%s:%s' % (fileNum, invoiceFilePath))
                         specialFile = eachSpecialData.to_excel('%s' % invoiceFilePath, merge_cells=False)
                         fileNum += 1
@@ -2370,8 +2369,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                                 # outputFlieName = msg['Company Name'] + '-' + msg['Revenue'] + '-' + msg['fapiao']
                                 outputFlie = outputFlieName + '.pdf'
                                 exportUrl = configContent['Ele_Invoice_Files_Export_URL']
-                                newFolder = File_Opetate()
-                                newFolder.createFolder(exportUrl)
+                                self.createFolder(exportUrl)
                                 pdfOperate.saveAs(fileUrl, '%s\\%s' % (exportUrl, outputFlie))
                                 log_list = {
                                     'id': i,

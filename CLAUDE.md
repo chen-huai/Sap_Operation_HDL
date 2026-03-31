@@ -1,108 +1,129 @@
 # CLAUDE.md
 
-请用中文回复，所有测试模块都放在test中
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+> 最后更新：2026-03-31 | 请用中文回复，所有测试模块都放在 `test/` 中
 
-## Project Overview
+## 项目概述
 
-This is a SAP automation tool built with Python and PyQt5 that provides automated SAP order creation, data processing, and PDF file renaming capabilities. The application features a tabbed GUI interface for different operations.
+**Sap_Operation_HDL** — 基于 Python + PyQt5 的 SAP 自动化工具，提供 SAP 订单自动创建、数据处理、PDF 发票重命名、营收工时分配等功能，具有多选项卡 GUI 界面。
 
-## Key Dependencies
+## 架构总览
 
-- **PyQt5**: GUI framework (5.15.11)
-- **pandas**: Data processing (2.2.2)
-- **win32com**: SAP GUI automation
-- **PDF libraries**: pdfminer.six, pdfplumber, pypdfium2 for PDF processing
-- **Excel libraries**: openpyxl for Excel file operations
-- **PyInstaller**: For building executable files
+```mermaid
+graph TD
+    subgraph GUI层
+        A[Sap_Operate_theme.py<br/>主入口 + 业务逻辑] --> B[Sap_Operate_Ui.py<br/>自动生成的UI代码]
+        A --> C[Data_Table.py<br/>表格窗口]
+        C --> D[Table_Ui.py<br/>表格UI代码]
+        A --> TM[theme_manager_theme.py<br/>主题管理]
+    end
 
-## Main Application Structure
+    subgraph 业务模块
+        A --> E[Sap_Function.py<br/>SAP GUI自动化]
+        A --> F[Get_Data.py<br/>数据读取与转换]
+        A --> G[PDF_Operate.py<br/>PDF读取与重命名]
+        A --> H[PDF_Parser_Utils.py<br/>PDF字段提取]
+        A --> I[Revenue_Operate.py<br/>营收工时分配]
+        A --> J[Excel_Field_Mapper.py<br/>字段映射]
+        E --> K[Sap_SmartFinder.py<br/>SAP元素智能查找]
+    end
 
-### Core Files
-- `Sap_Operate.py`: Main application entry point with GUI logic and business operations
-- `Sap_Operate_Ui.py`: Auto-generated PyQt UI code from Sap_Operate_Ui.ui
-- `Sap_Operate_theme.py`: Themed version of the main application
-- `build_with_pyinstaller.py`: Build script for creating executables
+    subgraph 基础设施
+        A --> L[Logger.py<br/>日志记录]
+        A --> M[File_Operate.py<br/>文件操作]
+        A --> N[Save_To_CSV.py<br/>CSV保存]
+        A --> O[chicon.py<br/>图标资源]
+    end
 
-### Functional Modules
-- `Get_Data.py`: Data processing from Excel/CSV files with field mapping
-- `Sap_Function.py`: SAP GUI automation using win32com client
-- `File_Operate.py`: File system operations and path management
-- `PDF_Operate.py`: PDF processing and renaming functionality
-- `Data_Table.py`: Table data handling and display
-- `Excel_Field_Mapper.py`: Excel field mapping utilities
-- `Logger.py`: Logging functionality
+    subgraph auto_updater模块
+        A --> P[auto_updater/<br/>自动更新模块]
+        P --> P1[github_client.py]
+        P --> P2[download_manager.py]
+        P --> P3[backup_manager.py]
+        P --> P4[update_executor.py]
+        P --> P5[ui/ 子模块<br/>更新UI组件]
+    end
 
-### UI Components
-- `Table_Ui.py`: Additional table interface components
-- `Sap_Operate_Ui.ui`: Qt Designer UI file
-- `Table_Ui.ui`: Table-specific UI file
-
-## Common Development Commands
-
-### Running the Application
-```bash
-# Main application
-python Sap_Operate.py
-
-# Themed version
-python Sap_Operate_theme.py
+    subgraph 构建
+        Q[build_with_pyinstaller.py]
+        R[build_with_signing.py]
+    end
 ```
 
-### Building Executable
+## 模块索引
+
+| 模块 | 路径 | 职责 |
+|------|------|------|
+| 主入口 | `Sap_Operate_theme.py` | MyMainWindow 主窗口，集成所有功能 |
+| SAP 自动化 | `Sap_Function.py` | Sap 类，通过 win32com 操作 SAP GUI |
+| SAP 智能查找 | `Sap_SmartFinder.py` | SmartContainerFinder，SAP 元素定位 |
+| 数据读取 | `Get_Data.py` | Get_Data 类，Excel/CSV 读取与字段映射 |
+| 字段映射 | `Excel_Field_Mapper.py` | ExcelFieldMapper，多命名风格字段匹配 |
+| PDF 操作 | `PDF_Operate.py` | PDF_Operate 类，PDF 读取与另存 |
+| PDF 解析 | `PDF_Parser_Utils.py` | 发票字段提取（公司名、金额、发票号） |
+| 营收分配 | `Revenue_Operate.py` | RevenueAllocator，工时与营收分配计算 |
+| 表格窗口 | `Data_Table.py` | MyTableWindow，数据表格展示 |
+| 日志 | `Logger.py` | Logger 类，基于 pandas 的操作日志 |
+| 文件操作 | `File_Operate.py` | File_Opetate 类，路径和文件夹管理 |
+| CSV 保存 | `Save_To_CSV.py` | CSV 文件保存工具 |
+| 主题管理 | `theme_manager_theme.py` | ThemeManager，应用主题切换 |
+| 图标资源 | `chicon.py` | 内嵌图标 base64 数据 |
+| 自动更新 | `auto_updater/` | 基于 GitHub Releases 的完整更新系统 |
+| 构建脚本 | `build_with_pyinstaller.py` | PyInstaller 打包 |
+| 签名构建 | `build_with_signing.py` | 带代码签名的打包 |
+
+## 关键依赖
+
+- **PyQt5** 5.15.11 — GUI 框架
+- **pandas** 2.2.2 — 数据处理
+- **win32com** — SAP GUI Scripting 自动化（仅 Windows）
+- **pdfplumber / pdfminer.six / pypdfium2** — PDF 解析
+- **openpyxl** — Excel 读写
+- **chinese_calendar** — 中国节假日判断（营收模块）
+- **PyInstaller** — 构建可执行文件
+
+## 常用命令
+
 ```bash
-# Using the build script
+# 运行主程序
+python Sap_Operate_theme.py
+
+# 构建可执行文件
 python build_with_pyinstaller.py
 
-# Manual PyInstaller command
+# 手动 PyInstaller
 pyinstaller --onefile --windowed --clean --noconfirm --icon=Sap_Operate_Logo.ico Sap_Operate_theme.py
 ```
 
+## 数据流
 
-## Application Features
+1. **输入** → Excel/CSV 文件经 `Get_Data.py` 读取
+2. **映射** → `Excel_Field_Mapper.py` 统一多命名风格字段
+3. **SAP 操作** → `Sap_Function.py` 通过 win32com 自动化 SAP GUI
+4. **PDF 处理** → `PDF_Operate.py` + `PDF_Parser_Utils.py` 解析发票并重命名
+5. **营收分配** → `Revenue_Operate.py` 按工时分配营收
+6. **输出** → GUI 展示 + 日志记录
 
-### Main Operations
-- **SAP Order Creation**: Automated creation of orders in SAP system
-- **Data Processing**: Split and merge data based on billing information
-- **PDF Renaming**: Automatic PDF file renaming based on invoice data
-- **Data Recovery**: Retrieve and ensure data integrity
+## SAP 集成要求
 
-### GUI Interface
-- Tabbed interface with multiple operation sections
-- File selection dialogs for data input
-- Real-time logging and status display
-- Configuration import/export functionality
+- SAP GUI 已安装并运行
+- Scripting 已在 SAP GUI 中启用
+- 用户具有相应 SAP 权限
 
-## Configuration
+## 配置
 
-The application generates a `config` folder on the desktop with `config_sap.csv` for user-specific settings. The configuration file contains parameters for SAP operations and data processing rules.
+- 桌面 `config/config_sap.csv` — 用户配置文件
+- `auto_updater/config_constants.py` — 版本号与更新配置
 
-## Data Flow
+## 文件命名约定
 
-1. **Data Input**: Excel/CSV files are loaded via `Get_Data.py`
-2. **Data Processing**: Field mapping and transformation using `Excel_Field_Mapper.py`
-3. **SAP Operations**: Automated GUI interactions via `Sap_Function.py`
-4. **File Operations**: PDF processing and file management
-5. **Output**: Results displayed in GUI and logged for audit
+- `*_Ui.py` — Qt Designer 生成的 UI 代码（勿手动编辑）
+- `*.ui` — Qt Designer 源文件
+- `*.ico` — 应用图标
+- `dist/` / `build/` — 构建产物（已 gitignore）
 
-## SAP Integration
+## 全局规范
 
-The application uses win32com to interact with SAP GUI Scripting engine. Key requirements:
-- SAP GUI must be installed and running
-- Scripting must be enabled in SAP GUI
-- User must have appropriate SAP permissions
-
-## File Naming Conventions
-
-- Main executables: `Sap_Operate_theme.exe` (built version)
-- UI files: `*_Ui.py` (generated), `*.ui` (Qt Designer source)
-- Icon files: `*.ico` for application branding
-- Build artifacts: `dist/`, `build/` directories
-
-## Error Handling
-
-The application includes comprehensive error handling with user feedback through the GUI. Key error scenarios include:
-- SAP connection failures
-- File access issues
-- Data format problems
-- GUI automation timeouts
+- 所有回复使用中文
+- 测试文件放在 `test/` 目录
+- UI 文件由 Qt Designer 生成，不手动编辑 `*_Ui.py`
+- 字段映射通过 `Excel_Field_Mapper.py` 的映射表维护
