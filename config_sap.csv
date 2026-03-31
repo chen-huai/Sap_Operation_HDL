@@ -1,0 +1,190 @@
+﻿特殊开票,内容,备注
+SAP_Date_URL,N:\XM Softlines\6. Personel\5. Personal\Supporting Team\2.财务\2.SAP\1.ODM Data - XM\8.软件数据,文件数据路径
+Invoice_File_URL,N:\XM Softlines\6. Personel\5. Personal\Supporting Team\2.财务\2.SAP\1.ODM Data - XM\2.特殊开票,特殊开票文件路径
+Invoice_File_Name,特殊开票要求2022.xlsx,特殊开票文件名称
+Data数据处理,内容,备注
+Row Data,Client Contact Name,以;分隔，横向添加数据
+Column Data,Project No.;Currency;Amount with VAT;Reference No.,以;分隔，纵向添加数据
+Row Check,0,"是否默认被选中,1选中，0未选中"
+Column Check,0,"是否默认被选中,1选中，0未选中"
+Combine Key,CS;Sales;Currency;Material Code;Invoices' name (Chinese);Buyer(GPC);Month;Exchange Rate,以;分隔，数据透视字段
+SAP登入信息,内容,备注
+Login_msg,DR-0486-01->601-240,订单类型-销售组织-分销渠道-销售办事处-销售组
+Business_Department,CS,"业务部门,名称会用于后续"
+Lab_1,PHY,代表实验室，会用于后续
+Lab_2,CHM,代表实验室，会用于后续
+T20,PHY,代表实验室，会用于后续
+T75,CHM,代表实验室，会用于后续
+Hourly Rate,金额,备注
+CS_Hourly_Rate,329.14,每年更新
+CHM_Hourly_Rate,342,每年更新
+PHY_Hourly_Rate,334.75,每年更新
+成本中心,编号,备注
+CS_Selected,1,"是否默认被选中,1选中，0未选中"
+PHY_Selected,1,"是否默认被选中,1选中，0未选中"
+CHM_Selected,1,"是否默认被选中,1选中，0未选中"
+CS_Cost_Center,48601240,CS成本中心
+CHM_Cost_Center,48601293,CHM成本中心
+PHY_Cost_Center,48601294,PHY成本中心
+计划成本,数值,备注
+Plan_Cost_Parameter,0.9,实际的90%，预留10%利润
+Significant_Digits,2,保留几位有效数值
+实验室成本比例,数值,备注
+CHM_Cost_Parameter,0.3,给到CHM30%
+PHY_Cost_Parameter,0.3,给到PHY30%
+405_Item_1000,0.5,405分配规则
+405_Item_2000,0.5,405分配规则
+441_Item_1000,0.8,441分配规则
+441_Item_2000,0.2,441分配规则
+430_Item_1000,0.8,430分配规则
+430_Item_2000,0.2,430分配规则
+T20-430-A2,PHY_1000/CHM_2000,1000/2000对应的lab
+T20-430-A2_mc,T20-430-00/T75-430-00,1000/2000对应的mc
+T75-441-A2,CHM_1000/PHY_2000,1000/2000对应的lab
+T75-441-A2_mc,T75-441-00/T20-441-00,1000/2000对应的mc
+T75-405-A2,CHM_1000/PHY_2000,1000/2000对应的lab
+T75-405-A2_mc,T75-405-00/T20-405-00,1000/2000对应的mc
+Max_Hour,8,最大工作时长
+Hours_Combine_Key,Order Number;Material Code;Primary CS,以;分隔，数据透视字段
+Hour_Files_Import_URL,N:\XM Softlines\6. Personel\5. Personal\Supporting Team\2.财务\2.SAP\1.ODM Data - XM\3.Hours,Invoice文件导入路径
+Hour_Files_Export_URL,N:\XM Softlines\6. Personel\5. Personal\Supporting Team\2.财务\2.SAP\1.ODM Data - XM\3.Hours,Invoice文件导入路径
+Hour_Field_Mapping,"{'staff_id': 'staff_id','week': 'week','order_no': 'order_no','allocated_hours': 'allocated_hours','office_time':'office_time','material_code': 'material_code','item': 'item','allocated_day': 'allocated_day','staff_name': 'staff_name'}",对应字段映射
+DATA A数据填写,判断依据,备注
+Data_A_E1,5010815347;5010427355;5010913488;5010685589;5010829635;5010817524,"Data A录E1,新添加用;隔开即可"
+Data_A_Z2,5010908478;5010823259;5010989355,"Data A录Z2,新添加用;隔开即可"
+SAP操作,内容,备注
+Cost_VAT_Selected,1,"是否默认被选中,1选中，0未选中"
+NVA01_Selected,1,"是否默认被选中,1选中，0未选中"
+NVA02_Selected,1,"是否默认被选中,1选中，0未选中"
+NVF01_Selected,0,"是否默认被选中,1选中，0未选中"
+NVF03_Selected,0,"是否默认被选中,1选中，0未选中"
+DataB_Selected,1,"是否默认被选中,1选中，0未选中"
+Plan_Cost_Selected,25,每月超过几号自动选中（不包含）
+Save_Selected,1,"是否默认被选中,1选中，0未选中"
+Every_Selected,0,"是否默认被选中,1选中，0未选中"
+Contact_Selected,1,"是否默认被选中,1选中，0未选中"
+管理操作,内容,备注
+Billing_List_URL,N:\XM Softlines\6. Personel\5. Personal\Supporting Team\2.财务\3.Billing存档\4.XM-billing list\2025,Billing list文件默认路径
+Add_CS_Msg_Selected,1,"是否默认被选中,1选中，0未选中"
+Invoice_No_Selected,1,"是否默认被选中,1选中，0未选中"
+Invoice_Start_Num,486,Invoice的起始数字
+Invoice_Num,9,Invoice的总位数
+Company_Name_Selected,1,"是否默认被选中,1选中，0未选中"
+Order_No_Selected,0,"是否默认被选中,1选中，0未选中"
+Invoice_Contact_Selected,0,"是否默认被选中,1选中，0未选中"
+Order_Start_Num,748,Order的起始数字
+Order_Num,9,Order的总位数
+Project_No_Selected,0,"是否默认被选中,1选中，0未选中"
+Invoice_Name,CS + Invoice No + Company Name,Invoice文件名称默认规则
+Invoice_Files_Import_URL,N:\XM Softlines\6. Personel\5. Personal\Supporting Team\2.财务\3.Billing存档\9.invoice,Invoice文件导入路径
+Invoice_Files_Export_URL,N:\XM Softlines\1. Project\3. Finance\02. WIP\Invoice 2025,Invoice文件导出路径
+Ele_Invoice_No_Selected,1,"是否默认被选中,1选中，0未选中"
+Ele_Invoice_Start_Num,486,电子发票的起始数字
+Ele_Invoice_Num,9,Invoice的总位数
+Ele_Order_No_Selected,0,"是否默认被选中,1选中，0未选中"
+Ele_Order_Start_Num,7486,电子发票的起始数字
+Ele_Order_Num,9,Order的总位数
+Ele_Company_Name_Selected,1,"是否默认被选中,1选中，0未选中"
+Ele_Revenue_Selected,1,"是否默认被选中,1选中，0未选中"
+Ele_Fapiao_No_Selected,0,"是否默认被选中,1选中，0未选中"
+Ele_Invoice_Name,CS + Invoice No + Company Name + Revenue,电子发票文件名称默认规则
+Ele_Invoice_Files_Import_URL,N:\Company Data\FCO\11.全电发票,全电发票路径
+Ele_Invoice_Files_Export_URL,N:\XM Softlines\1. Project\3. Finance\02. WIP\Invoice 2025,全电发票导出路径
+名称,编号,角色
+"Chen, Iris",6375287,CS
+"Chen, Eunice",6375162,CS
+"Ding, Daisy",6160431,CS
+"Du, Miley",6375211,CS
+"Guan, Elaine",6375125,CS
+"Huang, Mary",6375104,CS
+"Jiao, Joyce",6375079,CS
+"Lai, Tailor",6375014,CS
+"Lao, Keely",6375134,CS
+"Lin, Tina",6375091,CS
+"Lv, Rita",6375135,CS
+"Ma, Ella",6160372,CS
+"Qiu, Dora",6375241,CS
+"Qiu, Emily",6375235,CS
+"Shen, Jewel",6375124,CS
+"Zhang, Judy",6375176,CS
+"Li, Cathy",6375166,CS
+"Yang, Beauty",6375308,CS
+"Huang, May",6160385,CS
+"Cai, Barry",6375313,CS
+"Pan, Peki",6375201,CS
+"Liu, Amber",6375342,CS
+"Chen, Kate",6375337,CS
+"Liu, Morita",6375336,CS
+"Peng, Penny",6375351,CS
+"Zhang, Alaia",6375350,CS
+"Huang, Even",6375359,CS
+"Wei, Wynne",6375358,CS
+"Chen, Sarah",6375312,CS
+"Ou, Yedda",6375024,PHY
+"Zhang, Cathy",6375043,PHY
+"Su, Shayne",6375061,PHY
+"Qin, Bruce",6375119,PHY
+"Ye, Valentine",6375150,PHY
+"Zhang, Dragon",6375177,PHY
+"Zheng, Ariel",6375196,PHY
+"Lu, Esther",6375231,PHY
+"Yang, Miya",6375249,PHY
+"Zhan, Milla",6375271,PHY
+"Lv, Linda",6375273,PHY
+"Zeng, Tim",6375280,PHY
+"Xu, Simba",6375282,PHY
+"Wang, Peter",6375292,PHY
+"Zhou, Sean",6375306,PHY
+"Zeng, Winnie",6375320,PHY
+"Chen, Echo",6375321,PHY
+"Yu, Coley",6375323,PHY
+"Chen, Leah",6375324,PHY
+"Ji, Sunny",6375329,PHY
+"Li, Roy",6375339,PHY
+"Liu, Josie",6375341,PHY
+"Zhang, Yvette",6375349,PHY
+"Lin, Charlotte",6375354,PHY
+"Pan, James",6375355,PHY
+"Lin, Carl",6375360,PHY
+"Cheng, Ethan",6375369,PHY
+"Chen, Jacy",6375372,PHY
+"Su, Lucky",6181557,CHM
+"Dai, Jocelyn",6375017,CHM
+"Yang, Alisa",6375038,CHM
+"Zou, Rudi",6375039,CHM
+"Wang, Carry",6375064,CHM
+"Zhang, Lynn",6375089,CHM
+"Wu, Alan",6375092,CHM
+"Li, Jesse",6375093,CHM
+"Ou, Ida",6375112,CHM
+"Miao, Molly",6375158,CHM
+"Ye, Anne",6375182,CHM
+"Zeng, Cris",6375184,CHM
+"Lin, Jenny",6375252,CHM
+"Lin, Lucy",6375253,CHM
+"Chen, Limi",6375275,CHM
+"Chen, Nikki",6375277,CHM
+"Ye, Carter",6375279,CHM
+"Wu, Mindy",6375286,CHM
+"Han, Amy",6375299,CHM
+"Shen, Rocy",6375302,CHM
+"Chen, Bella",6375304,CHM
+"Ke, Coco",6375314,CHM
+"Chen, Helen",6375326,CHM
+"Huang, Edwina",6375330,CHM
+"Ma, Even",6375331,CHM
+Chen Snow,6375095,CS
+Jiang Season,6375178,CS
+Wang Moura,6375179,CS
+Lan Beta,6375268,CS
+Zhang Susie,6375274,CS
+Lai Suda,6375283,CS
+Xie Ann,6375285,CS
+Chen Autumn,6375293,CS
+Lin Lynne,6375334,CS
+Zhang Winter,6375365,CS
+Yang Bree,6375371,CS
+Du Linden,6375374,CHM
+Yan Alex,6375356,PHY
+Du Mathieu,6375375,PHY
+Wu Jaxon,6375376,PHY
