@@ -18,13 +18,14 @@ graph TD
     end
 
     subgraph 业务模块
-        A --> E[Sap_Function.py<br/>SAP GUI自动化]
+        A --> E[sap/<br/>SAP自动化模块]
+        E --> E1[sap/models.py<br/>数据模型+SapResult]
+        E --> E2[sap/function.py<br/>SAP GUI操作]
         A --> F[Get_Data.py<br/>数据读取与转换]
         A --> G[PDF_Operate.py<br/>PDF读取与重命名]
         A --> H[PDF_Parser_Utils.py<br/>PDF字段提取]
         A --> I[Revenue_Operate.py<br/>营收工时分配]
         A --> J[Excel_Field_Mapper.py<br/>字段映射]
-        E --> K[Sap_SmartFinder.py<br/>SAP元素智能查找]
     end
 
     subgraph 基础设施
@@ -54,8 +55,9 @@ graph TD
 | 模块 | 路径 | 职责 |
 |------|------|------|
 | 主入口 | `Sap_Operate_theme.py` | MyMainWindow 主窗口，集成所有功能 |
-| SAP 自动化 | `Sap_Function.py` | Sap 类，通过 win32com 操作 SAP GUI |
-| SAP 智能查找 | `Sap_SmartFinder.py` | SmartContainerFinder，SAP 元素定位 |
+| SAP 模块 | `sap/` | SAP 自动化操作包（models + function） |
+| SAP 数据模型 | `sap/models.py` | SapConfig, OrderData, RevenueData, OperationFlags, HourData, SapResult |
+| SAP 自动化 | `sap/function.py` | Sap 类，通过 win32com 操作 SAP GUI |
 | 数据读取 | `Get_Data.py` | Get_Data 类，Excel/CSV 读取与字段映射 |
 | 字段映射 | `Excel_Field_Mapper.py` | ExcelFieldMapper，多命名风格字段匹配 |
 | PDF 操作 | `PDF_Operate.py` | PDF_Operate 类，PDF 读取与另存 |
