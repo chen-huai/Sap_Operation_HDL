@@ -1,159 +1,172 @@
-"""
-SAP 操作数据模型定义
-
-使用方法:
-    from sap import SapConfig, OrderData, RevenueData, OperationFlags, HourData, SapResult
-    # 或
-    from sap.models import SapConfig, OrderData, RevenueData, OperationFlags, HourData, SapResult
-"""
+"""SAP 模块的数据模型。"""
 
 from dataclasses import dataclass, field
 
 
-@dataclass
+@dataclass(slots=True)
 class SapConfig:
-    """固定配置 -- 从 config.csv 加载, 订单间不变"""
+    """固定配置，通常从配置文件加载。"""
 
-    # 销售组织
+    # 销售组织相关固定参数。
     order_type: str
     sales_organization: str
     distribution_channels: str
     sales_office: str
 
-    # 成本中心
-    cost_center: str             # 原 salesGroup -> 订单成本中心
-    sub_cost_center_cs: str      # 原 csCostCenter -> CS分包成本中心
-    sub_cost_center_chm: str     # 原 chmCostCenter -> CHM分包成本中心
-    sub_cost_center_phy: str     # 原 phyCostCenter -> PHY分包成本中心
+    # 成本中心相关固定参数。
+    cost_center: str
+    sub_cost_center_cs: str
+    sub_cost_center_chm: str
+    sub_cost_center_phy: str
 
-    # 人员代码
+    # 合作伙伴代码。
     cs_code: str
     sales_code: str
 
-    # 数据分类列表
+    # DATA A 判定用的客户清单。
     data_ae1: list[str] = field(default_factory=list)
     data_az2: list[str] = field(default_factory=list)
 
-    # 阈值 (原硬编码)
+    # 阈值控制。
     revenue_threshold: float = 35000.0
     plan_cost_min_threshold: float = 1000.0
 
-    # A2 物料映射 (原 if/elif 硬编码)
-    # key: 物料子码, value: (Item1000物料号, Item2000物料号)
+    # A2 物料拆分映射，key 为子码，value 为 (item1000, item2000)。
     a2_material_mapping: dict[str, tuple[str, str]] = field(
         default_factory=lambda: {
-            '405': ('T75-405-00', 'T20-405-00'),
-            '430': ('T20-430-00', 'T75-430-00'),
-            '441': ('T75-441-00', 'T20-441-00'),
+            "405": ("T75-405-00", "T20-405-00"),
+            "430": ("T20-430-00", "T75-430-00"),
+            "441": ("T75-441-00", "T20-441-00"),
         }
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class OrderData:
-    """每单变动数据 -- 从 Excel 行读取"""
+    """订单业务数据。"""
 
+    # SAP 客户号。
     sap_no: str
+    # 客户项目号。
     project_no: str
+    # 物料代码。
     material_code: str
+    # 币种。
     currency_type: str
+    # 汇率，仅非 CNY 场景使用。
     exchange_rate: float
-    amount_vat: float
-    cost: float                        # 外币成本 (不含税)
+    # 外包成本。
+    cost: float
+    # 订单头短文本。
     short_text: str
-    long_text: str = ''
-    global_partner_code: str = ''
-    sales_name: str = ''               # 销售名称 (va01 联系人用)
-    ecd: str = ''                      # 预计完成日期 (原 self.oneWeekday)
+    # 含税金额，当前保留给上层业务使用。
+    amount_vat: float = 0.0
+    # Item 长文本。
+    long_text: str = ""
+    # 全球合作伙伴代码。
+    global_partner_code: str = ""
+    # 销售名称，当前主要用来判断是否需要补销售伙伴。
+    sales_name: str = ""
+    # 预计完成日期。
+    ecd: str = ""
 
 
-@dataclass
+@dataclass(slots=True)
 class RevenueData:
-    """成本分配数据 -- 从订单数据直接读取 (不再内部计算)"""
+    """营收和成本分配数据。"""
 
-    revenue: float                     # 未税收入
-    revenue_cny: float                 # 人民币收入 (原 revenueForCny)
+    # 未税收入。
+    revenue: float
+    # 人民币收入。
+    revenue_cny: float
 
-    # 部门成本
+    # Data B 使用的部门成本。
     chm_cost: float = 0.0
     phy_cost: float = 0.0
 
-    # 部门收入
-    chm_revenue: float = 0.0          # 原 chmRe
-    phy_revenue: float = 0.0          # 原 phyRe
+    # A2 双 item 使用的部门收入。
+    chm_revenue: float = 0.0
+    phy_revenue: float = 0.0
 
-    # 拆分物料 (D2/D3/A2) 成本核算
-    chm_cs_cost: float = 0.0          # 原 chmCsCostAccounting
-    chm_lab_cost: float = 0.0         # 原 chmLabCostAccounting
-    phy_cs_cost: float = 0.0          # 原 phyCsCostAccounting
-    phy_lab_cost: float = 0.0         # 原 phyLabCostAccounting
+    # 拆分物料计划成本数据。
+    chm_cs_cost: float = 0.0
+    chm_lab_cost: float = 0.0
+    phy_cs_cost: float = 0.0
+    phy_lab_cost: float = 0.0
 
-    # 非拆分物料成本核算
-    cs_cost: float = 0.0              # 原 csCostAccounting
-    lab_cost: float = 0.0             # 原 labCostAccounting
-
-
-@dataclass
-class OperationFlags:
-    """流程控制开关 -- 从 GUI CheckBox 读取"""
-
-    va01: bool = True
-    va02: bool = True
-    vf01: bool = False
-    vf03: bool = False
-    save: bool = True
-    lab_cost: bool = False
-    plan_cost: bool = False
-    cs: bool = True
-    chm: bool = True
-    phy: bool = True
-    every: bool = False                # 每次创建新 SAP 对象
-    contact: bool = True               # 是否添加联系人
+    # 普通物料计划成本数据。
+    cs_cost: float = 0.0
+    lab_cost: float = 0.0
 
 
-@dataclass
+@dataclass(slots=True, frozen=True)
+class PartnerOptions:
+    """VA01 合作伙伴写入选项。"""
+
+    # 是否补联系人。
+    add_contact: bool = True
+    # 是否补销售伙伴。
+    add_sales_partner: bool = True
+
+
+@dataclass(slots=True, frozen=True)
+class CostOptions:
+    """计划成本写入选项。"""
+
+    # 是否写入 CS 计划成本。
+    include_cs: bool = True
+    # 是否写入 CHM 计划成本。
+    include_chm: bool = True
+    # 是否写入 PHY 计划成本。
+    include_phy: bool = True
+
+
+@dataclass(slots=True)
 class HourData:
-    """工时记录数据 -- 独立模块"""
+    """工时记录数据。"""
 
+    # 员工工号。
     staff_id: str
+    # 周次。
     week: str
+    # 分配日期。
     allocated_day: str
+    # 订单号。
     order_no: str
+    # Item 编号。
     item: str
+    # 活动/物料代码。
     material_code: str
+    # 分配工时。
     allocated_hours: float
+    # 办公时间。
     office_time: float
 
 
-@dataclass
+@dataclass(slots=True)
 class SapResult:
-    """SAP 操作统一返回结果
+    """统一的 SAP 操作结果。"""
 
-    替代原 res = {'flag': 1, 'msg': ''} 的 dict 模式,
-    提供类型安全和 IDE 自动补全。
-
-    使用方法:
-        result = SapResult()                    # 默认成功
-        result = SapResult.fail('错误信息')     # 快速创建失败结果
-        result.append_message('追加信息')       # 追加消息
-
-        if result.success:
-            print(result.order_no)
-    """
-
+    # 是否成功。
     success: bool = True
-    message: str = ''
-    order_no: str = ''
-    proforma_no: str = ''
-    sap_amount_vat: str = ''
+    # 错误或补充消息。
+    message: str = ""
+    # 订单号。
+    order_no: str = ""
+    # 形式发票号。
+    proforma_no: str = ""
+    # SAP 实际金额文本。
+    sap_amount_vat: str = ""
+    # 当前结果对应的步骤标识。
+    step: str = ""
 
     @staticmethod
-    def fail(msg: str) -> 'SapResult':
-        """快速创建失败结果"""
-        return SapResult(success=False, message=msg)
+    def fail(msg: str, *, step: str = "") -> "SapResult":
+        """创建失败结果，统一失败出口。"""
+        return SapResult(success=False, message=msg, step=step)
 
     def append_message(self, msg: str) -> None:
-        """追加消息, 用分号分隔"""
+        """在原消息后追加信息，便于保留多个警告/失败原因。"""
         if self.message:
             self.message = f"{self.message};{msg}"
         else:

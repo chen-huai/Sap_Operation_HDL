@@ -1,7 +1,6 @@
-"""
-兼容桩 -- 实际实现已移至 sap/function.py
+"""旧入口已废弃。"""
 
-过渡期保留, 待 Sap_Operate_theme.py 调用方改造后删除。
-"""
-
-from sap.function import *  # noqa: F401,F403
+raise ImportError(
+    "Sap_Function.py 已废弃。请改用新的 sap 模块入口："
+    "from sap import SapSession, OrderService, InvoiceService, HourService"
+)

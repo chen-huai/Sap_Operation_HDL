@@ -1,26 +1,35 @@
-"""
-SAP 自动化操作模块
+"""解耦后的 SAP 模块公开入口。
 
-使用方法:
-    from sap import Sap, SapConfig, OrderData, RevenueData, OperationFlags, HourData, SapResult
+对外只暴露：
+1. 数据模型
+2. 会话对象
+3. 按业务域划分的服务对象
 """
 
 from sap.models import (
-    SapConfig,
-    OrderData,
-    RevenueData,
-    OperationFlags,
+    CostOptions,
     HourData,
+    OrderData,
+    PartnerOptions,
+    RevenueData,
+    SapConfig,
     SapResult,
 )
-from sap.function import Sap
+from sap.services.hour_service import HourService
+from sap.services.invoice_service import InvoiceService
+from sap.services.order_service import OrderService
+from sap.session import SapSession
 
 __all__ = [
-    'Sap',
-    'SapConfig',
-    'OrderData',
-    'RevenueData',
-    'OperationFlags',
-    'HourData',
-    'SapResult',
+    "CostOptions",
+    "HourData",
+    "HourService",
+    "InvoiceService",
+    "OrderData",
+    "OrderService",
+    "PartnerOptions",
+    "RevenueData",
+    "SapConfig",
+    "SapResult",
+    "SapSession",
 ]
