@@ -1,25 +1,63 @@
-"""
-sap/test 共享 pytest fixtures
+"""sap/test 的共享 pytest 配置。"""
 
-使用方法:
-    pytest 自动加载 conftest.py，fixture 通过参数名注入测试函数。
-"""
+from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
-from unittest.mock import MagicMock
 
 from sap.test.helpers import (
-    make_config, make_flags, create_sap_instance, SapResult,
+    create_hour_service,
+    create_invoice_service,
+    create_order_service,
+    create_raw_session,
+    create_sap_session,
 )
 
 
-@pytest.fixture
-def mock_session():
-    """Mock SAP GUI session"""
-    return MagicMock()
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-integration",
+        action="store_true",
+        default=False,
+        help="运行需要真实 SAP GUI 的集成测试",
+    )
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "integration: 需要真实 SAP GUI 的集成测试")
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--run-integration"):
+        return
+
+    skip_integration = pytest.mark.skip(reason="默认跳过集成测试，使用 --run-integration 显式开启")
+    for item in items:
+        if "integration" in Path(str(item.fspath)).parts:
+            item.add_marker(skip_integration)
 
 
 @pytest.fixture
-def sap_instance(mock_session):
-    """创建 Sap 实例，跳过 __init__ COM 连接"""
-    return create_sap_instance(mock_session=mock_session)
+def raw_session():
+    return create_raw_session()
+
+
+@pytest.fixture
+def sap_session(raw_session):
+    return create_sap_session(raw_session)
+
+
+@pytest.fixture
+def order_service(raw_session):
+    return create_order_service(raw_session)
+
+
+@pytest.fixture
+def invoice_service(raw_session):
+    return create_invoice_service(raw_session)
+
+
+@pytest.fixture
+def hour_service(raw_session):
+    return create_hour_service(raw_session)
