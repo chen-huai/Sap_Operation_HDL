@@ -234,7 +234,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
         oneWeekday = (datetime.datetime.now() + datetime.timedelta(days=7)).strftime('%Y.%m.%d')
         desktopUrl = os.path.join(os.path.expanduser("~"), 'Desktop')
         configFileUrl = '%s/config' % desktopUrl
-        configFile = os.path.exists('%s/config_sap.csv' % configFileUrl)
+        configFile = os.path.exists('%s/config_sap_HDL.csv' % configFileUrl)
         # print(desktopUrl,configFileUrl,configFile)
         if not configFile:  # 判断是否存在文件夹如果不存在则创建为文件夹
             reply = QMessageBox.question(self, '信息', '确认是否要创建配置文件', QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
@@ -252,7 +252,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
     # 获取配置文件内容
     def getConfigContent(self):
         # 配置文件
-        csvFile = pd.read_csv('%s/config_sap.csv' % configFileUrl, names=['A', 'B', 'C'])
+        csvFile = pd.read_csv('%s/config_sap_HDL.csv' % configFileUrl, names=['A', 'B', 'C'])
         global configContent
         global username
         global role
@@ -413,10 +413,10 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
         ]
         config = np.array(configContent)
         df = pd.DataFrame(config)
-        df.to_csv('%s/config_sap.csv' % configFileUrl, index=0, header=0, encoding='utf_8_sig')
+        df.to_csv('%s/config_sap_HDL.csv' % configFileUrl, index=0, header=0, encoding='utf_8_sig')
         self.textBrowser_2.append("配置文件创建成功")
         QMessageBox.information(self, "提示信息",
-                                "默认配置文件已经创建好，\n如需修改请在用户桌面查找config文件夹中config_sap.csv，\n将相应的文件内容替换成用户需求即可，修改后记得重新导入配置文件。",
+                                "默认配置文件已经创建好，\n如需修改请在用户桌面查找config文件夹中config_sap_HDL.csv，\n将相应的文件内容替换成用户需求即可，修改后记得重新导入配置文件。",
                                 QMessageBox.Yes)
 
     # 导出配置文件

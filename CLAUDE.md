@@ -87,13 +87,13 @@ graph TD
 
 ```bash
 # 运行主程序
-python Sap_Operate_theme.py
+python Sap_Operate_HDL.py
 
 # 构建可执行文件
 python build_with_pyinstaller.py
 
 # 手动 PyInstaller
-pyinstaller --onefile --windowed --clean --noconfirm --icon=Sap_Operate_Logo.ico Sap_Operate_theme.py
+pyinstaller --onefile --windowed --clean --noconfirm --icon=Sap_Operate_Logo.ico Sap_Operate_HDL.py
 ```
 
 ## 数据流

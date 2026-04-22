@@ -24,10 +24,10 @@ class PackagerConfig:
     """打包配置类"""
 
     def __init__(self):
-        self.entry_file = 'Sap_Operate_theme.py'
-        self.spec_file = 'Sap_Operate_theme.spec'
+        self.entry_file = 'Sap_Operate_HDL.py'
+        self.spec_file = 'Sap_Operate_HDL.spec'
         self.icon_file = 'Sap_Operate_Logo.ico'
-        self.app_name = 'Sap_Operate_theme'
+        self.app_name = 'Sap_Operate_HDL'
         self.clean_build = True
         self.onefile = True  # 单文件模式
 

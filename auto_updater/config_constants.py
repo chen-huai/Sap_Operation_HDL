@@ -5,17 +5,17 @@
 """
 
 # 应用配置
-SOFTWARE_ID: str = "sap_operation_tool"  # 软件唯一标识，用于多软件状态隔离
-APP_NAME: str = "Sap_Operate_theme"
-APP_EXECUTABLE: str = "Sap_Operate_theme.exe"
+SOFTWARE_ID: str = "sap_operation_HDL_tool"  # 软件唯一标识，用于多软件状态隔离
+APP_NAME: str = "Sap_Operate_HDL"
+APP_EXECUTABLE: str = "Sap_Operate_HDL.exe"
 
 # GitHub仓库配置
 GITHUB_OWNER: str = "chen-huai"
-GITHUB_REPO: str = "Sap_Operation"
+GITHUB_REPO: str = "Sap_Operate_HDL"
 GITHUB_API_BASE: str = "https://api.github.com"
 
 # 版本配置
-CURRENT_VERSION: str = "2.1.3"  # 修复 pandas 打包问题（pandas 降级到 2.2.2，添加 C 扩展模块）
+CURRENT_VERSION: str = "1.0.0"
 UPDATE_CHECK_INTERVAL_DAYS: int = 30
 AUTO_CHECK_ENABLED: bool = True
 
