@@ -28,6 +28,7 @@ from theme_manager_theme import ThemeManager
 from Revenue_Operate import *
 from auto_updater.config_constants import CURRENT_VERSION
 from auto_updater import AutoUpdater, UI_AVAILABLE
+from sap import OrderData, OrderService, PartnerOptions, RevenueData, SapConfig, SapSession
 import logging
 
 # 延迟导入qt_material以避免警告
@@ -95,7 +96,8 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
 
         # 设置自动更新功能
         self.setup_auto_update()
-        self.pushButton_11.clicked.connect(self.sapOperate)
+        self.pushButton_11.clicked.connect(self.sap_operate)
+        # self.pushButton_11.clicked.connect(self.sapOperate)
         self.pushButton_12.clicked.connect(self.textBrowser.clear)
         self.pushButton_20.clicked.connect(self.textBrowser_2.clear)
         self.pushButton_16.clicked.connect(self.getFileUrl)
@@ -154,12 +156,10 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
         # 性能优化：初始化更新控制变量
         self._last_update_time = 0
 
-        # 注意：actionUpdate信号由setup_auto_update()中的setup_update_ui()自动连接
-        # 无需手动连接，避免重复触发
-
-        # 异步检查更新（不阻塞主线程）
-        from PyQt5.QtCore import QTimer
-        QTimer.singleShot(1000, self.check_for_updates_startup)  # 1秒后检查更新
+        # 注意：actionUpdate信号和启动时静默检查，已经由 setup_auto_update()
+        # 内部的 auto_updater.setup_update_ui() 统一接管。
+        # 这里不再额外注册一次启动检查，避免在配置文件初始化弹窗期间
+        # 触发第二个更新检查，造成模态对话框重叠和界面假死。
 
     def init_theme_action(self):
         theme_action = QAction(QIcon('theme_icon.png'), 'Toggle Theme', self)
@@ -593,11 +593,10 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
             self.status_bar.showMessage("状态栏初始化失败")
 
     def check_for_updates_startup(self):
-        """启动时检查更新，不阻塞主线程"""
+        """兼容保留；启动检查已由 auto_updater 内部统一处理。"""
         try:
             if hasattr(self, 'auto_updater') and self.auto_updater:
-                # 使用正确的API进行启动时更新检查
-                self.auto_updater.check_for_updates_with_ui(force_check=True)
+                self.auto_updater.ui_manager.startup_update_check()
             else:
                 print("自动更新器未初始化")
 
@@ -1213,6 +1212,110 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
         
         return revenueData
 
+    def sap_operate(self, guiData=None, revenueData=None, sap_obj=None):
+        def _to_float(value, default=0.0):
+            try:
+                if value in ("", None):
+                    return default
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        guiData = guiData or MyMainWindow.getGuiData(self)
+        revenueData = revenueData or MyMainWindow.getRevenueDataUnified(self, guiData, configContent)
+
+        sap_session = None
+        own_session = False
+        if sap_obj and getattr(sap_obj, "_sap_session", None):
+            sap_session = sap_obj._sap_session
+
+        try:
+            if sap_session is None:
+                sap_session = SapSession.connect()
+                own_session = True
+
+            config = SapConfig(
+                order_type=str(guiData.get('orderType', '')).strip(),
+                sales_organization=str(guiData.get('salesOrganization', '')).strip(),
+                distribution_channels=str(guiData.get('distributionChannels', '')).strip(),
+                sales_office=str(guiData.get('salesOffice', '')).strip(),
+                # 240
+                cost_center=str(guiData.get('salesGroup', '')).strip(),
+                sub_cost_center_cs=str(guiData.get('csCostCenter', '')).strip(),
+                sub_cost_center_chm=str(guiData.get('chmCostCenter', '')).strip(),
+                sub_cost_center_phy=str(guiData.get('phyCostCenter', '')).strip(),
+                cs_code=str(guiData.get('csCode', '')).strip(),
+                sales_code=str(guiData.get('salesCode', '')).strip(),
+                data_ae1=guiData.get('dataAE1', []),
+                data_az2=guiData.get('dataAZ2', []),
+            )
+
+            order = OrderData(
+                sap_no=str(guiData.get('sapNo', '')).strip(),
+                project_no=str(guiData.get('projectNo', '')).strip(),
+                material_code=str(guiData.get('materialCode', '')).strip(),
+                currency_type=str(guiData.get('currencyType', '')).strip(),
+                exchange_rate=_to_float(guiData.get('exchangeRate'), 1.0),
+                cost=_to_float(guiData.get('cost')),
+                short_text=str(guiData.get('shortText', '')).strip(),
+                amount_vat=_to_float(guiData.get('amountVat')),
+                long_text=str(guiData.get('longText', '')).strip(),
+                global_partner_code=str(guiData.get('globalPartnerCode', '')).strip(),
+                sales_name=str(guiData.get('salesName', '')).strip(),
+                ecd=time.strftime("%Y.%m.%d"),
+            )
+
+            revenue = RevenueData(
+                revenue=_to_float(revenueData.get('revenue'), _to_float(guiData.get('amount'))),
+                revenue_cny=_to_float(
+                    revenueData.get('revenueForCny'),
+                    _to_float(guiData.get('amount')) * _to_float(guiData.get('exchangeRate'), 1.0),
+                ),
+                chm_cost=_to_float(revenueData.get('chmCost')),
+                phy_cost=_to_float(revenueData.get('phyCost')),
+                chm_revenue=_to_float(revenueData.get('chmRe')),
+                phy_revenue=_to_float(revenueData.get('phyRe')),
+                chm_cs_cost=_to_float(revenueData.get('chmCsCostAccounting')),
+                chm_lab_cost=_to_float(revenueData.get('chmLabCostAccounting')),
+                phy_cs_cost=_to_float(revenueData.get('phyCsCostAccounting')),
+                phy_lab_cost=_to_float(revenueData.get('phyLabCostAccounting')),
+                cs_cost=_to_float(revenueData.get('csCostAccounting')),
+                lab_cost=_to_float(revenueData.get('labCostAccounting')),
+            )
+
+            service = OrderService(sap_session, config)
+            result = service.create_order(
+                order,
+                revenue,
+                partner_options=PartnerOptions(
+                    add_contact=bool(guiData.get('contactCheck', True)),
+                    add_sales_partner=bool(order.sales_name),
+                ),
+            )
+
+            return {
+                'flag': 1 if result.success else 0,
+                'msg': result.message,
+                'orderNo': result.order_no,
+                'Proforma No.': result.proforma_no,
+                'sapAmountVat': result.sap_amount_vat,
+            }
+        except Exception as exc:
+            return {
+                'flag': 0,
+                'msg': f'VA01调用失败：{exc}',
+                'orderNo': '',
+                'Proforma No.': '',
+                'sapAmountVat': '',
+            }
+        finally:
+            if own_session and sap_session is not None:
+                sap_session.close()
+
+
+
+
+
 
     # SAP开Order操作
     def sapOperate(self, sap_obj):
@@ -1227,7 +1330,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
             guiData = MyMainWindow.getGuiData(self)
             orderNo = ''
             proformaNo = ''
-            if guiData['everyCheck']:
+            if guiData['everyCheck'] or not hasattr(sap_obj, 'va01_operate'):
                 sap_obj = Sap()
             if guiData['sapNo'] == '' or guiData['projectNo'] == '' or guiData['materialCode'] == '' or guiData[
                 'currencyType'] == '' or guiData['exchangeRate'] == '' or guiData['globalPartnerCode'] == '' or guiData[
@@ -1273,7 +1376,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                     flag = 1
                     # VA01
                     if guiData['va01Check']:
-                        va01_res = sap_obj.va01_operate(guiData, revenueData)
+                        va01_res = self.sap_operate(guiData, revenueData, sap_obj)
                         if va01_res['flag'] == 1:
                             # 是否要添加lab cost
                             if guiData['labCostCheck'] and va01_res['flag'] == 1:
