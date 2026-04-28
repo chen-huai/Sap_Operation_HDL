@@ -28,7 +28,7 @@ from theme_manager_theme import ThemeManager
 from Revenue_Operate import *
 from auto_updater.config_constants import CURRENT_VERSION
 from auto_updater import AutoUpdater, UI_AVAILABLE
-from sap import OrderData, OrderService, PartnerOptions, RevenueData, SapConfig, SapSession
+from sap import CostOptions, OrderData, OrderService, PartnerOptions, RevenueData, SapConfig, SapSession
 import logging
 
 # 延迟导入qt_material以避免警告
@@ -1212,7 +1212,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
         
         return revenueData
 
-    def sap_operate(self, guiData=None, revenueData=None, sap_obj=None):
+    def sap_operate(self, guiData=None, revenueData=None, sap_obj=None, include_followup=True):
         def _to_float(value, default=0.0):
             try:
                 if value in ("", None):
@@ -1220,6 +1220,38 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                 return float(value)
             except (TypeError, ValueError):
                 return default
+
+        def _legacy_result(result, **extra):
+            data = {
+                'flag': 1 if result.success else 0,
+                'msg': result.message,
+                'orderNo': getattr(result, 'order_no', '') or '',
+                'Proforma No.': getattr(result, 'proforma_no', '') or '',
+                'sapAmountVat': getattr(result, 'sap_amount_vat', '') or '',
+            }
+            data.update(extra)
+            return data
+
+        def _extract_order_no(session):
+            try:
+                order_no = str(session.read_text("wnd[0]/usr/ctxtVBAK-VBELN")).strip()
+                if order_no:
+                    return order_no
+            except Exception:
+                pass
+
+            try:
+                status_text = session.read_status()
+            except Exception:
+                return ''
+
+            match = re.search(r"(\d{6,})", status_text)
+            return match.group(1) if match else ''
+
+        if not isinstance(guiData, dict):
+            guiData = None
+        if not isinstance(revenueData, dict):
+            revenueData = None
 
         guiData = guiData or MyMainWindow.getGuiData(self)
         revenueData = revenueData or MyMainWindow.getRevenueDataUnified(self, guiData, configContent)
@@ -1284,22 +1316,98 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
             )
 
             service = OrderService(sap_session, config)
-            result = service.create_order(
-                order,
-                revenue,
-                partner_options=PartnerOptions(
-                    add_contact=bool(guiData.get('contactCheck', True)),
-                    add_sales_partner=bool(order.sales_name),
-                ),
-            )
-
-            return {
-                'flag': 1 if result.success else 0,
-                'msg': result.message,
-                'orderNo': result.order_no,
-                'Proforma No.': result.proforma_no,
-                'sapAmountVat': result.sap_amount_vat,
+            final_res = {
+                'flag': 1,
+                'msg': '',
+                'orderNo': '',
+                'Proforma No.': '',
+                'sapAmountVat': '',
             }
+
+            if guiData.get('va01Check', True):
+                result = service.create_order(
+                    order,
+                    revenue,
+                    partner_options=PartnerOptions(
+                        add_contact=bool(guiData.get('contactCheck', True)),
+                        add_sales_partner=bool(order.sales_name),
+                    ),
+                )
+                final_res = _legacy_result(result)
+                if not result.success or not include_followup:
+                    return final_res
+
+                if guiData.get('labCostCheck'):
+                    data_b_result = service.fill_lab_cost(order, revenue)
+                    if not data_b_result.success:
+                        return _legacy_result(data_b_result, orderNo=final_res['orderNo'])
+                    if data_b_result.message:
+                        final_res['msg'] = data_b_result.message
+
+                if guiData.get('va02Check') or guiData.get('saveCheck'):
+                    save_result = service.save('VA01')
+                    order_no = _extract_order_no(sap_session)
+                    if sap_obj is not None and hasattr(sap_obj, 'current_order_no'):
+                        sap_obj.current_order_no = order_no or getattr(sap_obj, 'current_order_no', '')
+                    if not save_result.success:
+                        return _legacy_result(save_result, orderNo=order_no or final_res['orderNo'])
+                    final_res['orderNo'] = order_no or final_res['orderNo']
+
+            if include_followup and guiData.get('va02Check'):
+                order_no = (
+                    final_res.get('orderNo')
+                    or getattr(sap_obj, 'current_order_no', '')
+                    or _extract_order_no(sap_session)
+                )
+                if not order_no:
+                    return {
+                        'flag': 0,
+                        'msg': '未找到可用于VA02的Order No.',
+                        'orderNo': '',
+                        'Proforma No.': '',
+                        'sapAmountVat': final_res.get('sapAmountVat', ''),
+                    }
+
+                open_result = service.open_order(order_no)
+                if not open_result.success:
+                    return _legacy_result(open_result, orderNo=order_no, sapAmountVat=final_res.get('sapAmountVat', ''))
+
+                item_result = service.add_items(order, revenue)
+                final_res = _legacy_result(item_result, orderNo=item_result.order_no or order_no)
+                if sap_obj is not None and hasattr(sap_obj, 'current_order_no'):
+                    sap_obj.current_order_no = final_res['orderNo']
+                if not item_result.success:
+                    return final_res
+
+                if guiData.get('planCostCheck'):
+                    cost_result = service.apply_plan_cost(
+                        order,
+                        revenue,
+                        cost_options=CostOptions(
+                            include_cs=bool(guiData.get('csCheck', True)),
+                            include_chm=bool(guiData.get('chmCheck', True)),
+                            include_phy=bool(guiData.get('phyCheck', True)),
+                        ),
+                    )
+                    if not cost_result.success:
+                        return _legacy_result(
+                            cost_result,
+                            orderNo=final_res['orderNo'],
+                            sapAmountVat=final_res.get('sapAmountVat', ''),
+                        )
+                    if cost_result.message:
+                        final_res['msg'] = cost_result.message
+
+                if guiData.get('vf01Check') or guiData.get('saveCheck'):
+                    save_result = service.save('VA02')
+                    if not save_result.success:
+                        return _legacy_result(
+                            save_result,
+                            orderNo=final_res['orderNo'],
+                            sapAmountVat=final_res.get('sapAmountVat', ''),
+                        )
+
+            return final_res
         except Exception as exc:
             return {
                 'flag': 0,
@@ -1376,7 +1484,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                     flag = 1
                     # VA01
                     if guiData['va01Check']:
-                        va01_res = self.sap_operate(guiData, revenueData, sap_obj)
+                        va01_res = self.sap_operate(guiData, revenueData, sap_obj, include_followup=False)
                         if va01_res['flag'] == 1:
                             # 是否要添加lab cost
                             if guiData['labCostCheck'] and va01_res['flag'] == 1:
