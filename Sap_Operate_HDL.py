@@ -1213,6 +1213,9 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
         return revenueData
 
     def sap_operate(self, guiData=None, revenueData=None, sap_obj=None, include_followup=True):
+        # 主按钮使用的统一 SAP 订单流程。
+        # include_followup=False 用于兼容旧的 sapOperate()；
+        # 旧流程仍会单独执行 Data B、VA02、发票等后续步骤。
         def _to_float(value, default=0.0):
             try:
                 if value in ("", None):
@@ -1222,6 +1225,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                 return default
 
         def _legacy_result(result, **extra):
+            # 保持旧 GUI 日志代码需要的返回结构。
             data = {
                 'flag': 1 if result.success else 0,
                 'msg': result.message,
@@ -1233,6 +1237,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
             return data
 
         def _extract_order_no(session):
+            # 优先读取订单号字段；保存后再从状态栏兜底提取订单号。
             try:
                 order_no = str(session.read_text("wnd[0]/usr/ctxtVBAK-VBELN")).strip()
                 if order_no:
@@ -1249,6 +1254,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
             return match.group(1) if match else ''
 
         if not isinstance(guiData, dict):
+            # PyQt clicked 信号可能会把 checked 布尔值传入槽函数。
             guiData = None
         if not isinstance(revenueData, dict):
             revenueData = None
@@ -1263,9 +1269,11 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
 
         try:
             if sap_session is None:
+                # 直接点击按钮时自行创建会话；批量模式可复用 sap_obj 的会话。
                 sap_session = SapSession.connect()
                 own_session = True
 
+            # 将 GUI 字典转换为 sap 服务层使用的类型化入参。
             config = SapConfig(
                 order_type=str(guiData.get('orderType', '')).strip(),
                 sales_organization=str(guiData.get('salesOrganization', '')).strip(),
@@ -1325,6 +1333,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
             }
 
             if guiData.get('va01Check', True):
+                # 步骤 1：VA01 创建订单抬头，并写入伙伴/文本等数据。
                 result = service.create_order(
                     order,
                     revenue,
@@ -1338,6 +1347,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                     return final_res
 
                 if guiData.get('labCostCheck'):
+                    # 步骤 2：Data B 在订单抬头写入 lab cost 行。
                     data_b_result = service.fill_lab_cost(order, revenue)
                     if not data_b_result.success:
                         return _legacy_result(data_b_result, orderNo=final_res['orderNo'])
@@ -1345,6 +1355,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                         final_res['msg'] = data_b_result.message
 
                 if guiData.get('va02Check') or guiData.get('saveCheck'):
+                    # VA02 需要已保存的订单号，所以先保存 VA01。
                     save_result = service.save('VA01')
                     order_no = _extract_order_no(sap_session)
                     if sap_obj is not None and hasattr(sap_obj, 'current_order_no'):
@@ -1354,6 +1365,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                     final_res['orderNo'] = order_no or final_res['orderNo']
 
             if include_followup and guiData.get('va02Check'):
+                # 步骤 3：VA02 重新打开订单，并追加 item 行和金额。
                 order_no = (
                     final_res.get('orderNo')
                     or getattr(sap_obj, 'current_order_no', '')
@@ -1380,6 +1392,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                     return final_res
 
                 if guiData.get('planCostCheck'):
+                    # 步骤 4：Plan Cost 为可选操作，并按 CS/CHM/PHY 勾选项执行。
                     cost_result = service.apply_plan_cost(
                         order,
                         revenue,
@@ -1399,6 +1412,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                         final_res['msg'] = cost_result.message
 
                 if guiData.get('vf01Check') or guiData.get('saveCheck'):
+                    # 创建发票或结束流程前，先保存 VA02。
                     save_result = service.save('VA02')
                     if not save_result.success:
                         return _legacy_result(
