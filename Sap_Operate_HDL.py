@@ -1224,6 +1224,35 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
             except (TypeError, ValueError):
                 return default
 
+        # 存放本次 SAP 操作的结构化步骤日志。
+        operation_steps = []
+
+        def _add_step(step, success=True, msg='', order_no='', sap_amount_vat=''):
+            # 记录单个操作步骤，供界面显示、Excel 日志和问题排查共用。
+            operation_steps.append({
+                'step': step,
+                'status': 'success' if success else 'failed',
+                'msg': msg or '',
+                'orderNo': order_no or '',
+                'sapAmountVat': sap_amount_vat or '',
+                'time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            })
+
+        def _format_steps_remark():
+            # 将结构化步骤日志汇总为旧 Remark 字段，兼容现有导出格式。
+            remark_items = []
+            for item in operation_steps:
+                status_text = '成功' if item['status'] == 'success' else '失败'
+                item_msg = f":{item['msg']}" if item['msg'] else ''
+                remark_items.append(f"{item['step']}[{status_text}]{item_msg}")
+            return ';'.join(remark_items)
+
+        def _attach_log(data):
+            # 在原返回结构上附加新日志字段，同时保留旧字段。
+            data['steps'] = list(operation_steps)
+            data['Remark'] = _format_steps_remark()
+            return data
+
         def _legacy_result(result, **extra):
             # 保持旧 GUI 日志代码需要的返回结构。
             data = {
@@ -1234,7 +1263,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                 'sapAmountVat': getattr(result, 'sap_amount_vat', '') or '',
             }
             data.update(extra)
-            return data
+            return _attach_log(data)
 
         def _extract_order_no(session):
             # 优先读取订单号字段；保存后再从状态栏兜底提取订单号。
@@ -1330,6 +1359,8 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                 'orderNo': '',
                 'Proforma No.': '',
                 'sapAmountVat': '',
+                'steps': [],
+                'Remark': '',
             }
 
             if guiData.get('va01Check', True):
@@ -1342,6 +1373,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                         add_sales_partner=bool(order.sales_name),
                     ),
                 )
+                _add_step('VA01', result.success, result.message, result.order_no, result.sap_amount_vat)
                 final_res = _legacy_result(result)
                 if not result.success or not include_followup:
                     return final_res
@@ -1349,6 +1381,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                 if guiData.get('labCostCheck'):
                     # 步骤 2：Data B 在订单抬头写入 lab cost 行。
                     data_b_result = service.fill_lab_cost(order, revenue)
+                    _add_step('Data B', data_b_result.success, data_b_result.message, final_res['orderNo'])
                     if not data_b_result.success:
                         return _legacy_result(data_b_result, orderNo=final_res['orderNo'])
                     if data_b_result.message:
@@ -1358,6 +1391,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                     # VA02 需要已保存的订单号，所以先保存 VA01。
                     save_result = service.save('VA01')
                     order_no = _extract_order_no(sap_session)
+                    _add_step('Save VA01', save_result.success, save_result.message, order_no or final_res['orderNo'])
                     if sap_obj is not None and hasattr(sap_obj, 'current_order_no'):
                         sap_obj.current_order_no = order_no or getattr(sap_obj, 'current_order_no', '')
                     if not save_result.success:
@@ -1372,19 +1406,24 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                     or _extract_order_no(sap_session)
                 )
                 if not order_no:
+                    _add_step('VA02', False, '未找到可用于VA02的Order No.')
                     return {
                         'flag': 0,
                         'msg': '未找到可用于VA02的Order No.',
                         'orderNo': '',
                         'Proforma No.': '',
                         'sapAmountVat': final_res.get('sapAmountVat', ''),
+                        'steps': list(operation_steps),
+                        'Remark': _format_steps_remark(),
                     }
 
                 open_result = service.open_order(order_no)
+                _add_step('Open VA02', open_result.success, open_result.message, order_no, final_res.get('sapAmountVat', ''))
                 if not open_result.success:
                     return _legacy_result(open_result, orderNo=order_no, sapAmountVat=final_res.get('sapAmountVat', ''))
 
                 item_result = service.add_items(order, revenue)
+                _add_step('VA02', item_result.success, item_result.message, item_result.order_no or order_no, item_result.sap_amount_vat)
                 final_res = _legacy_result(item_result, orderNo=item_result.order_no or order_no)
                 if sap_obj is not None and hasattr(sap_obj, 'current_order_no'):
                     sap_obj.current_order_no = final_res['orderNo']
@@ -1402,6 +1441,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                             include_phy=bool(guiData.get('phyCheck', True)),
                         ),
                     )
+                    _add_step('Plan Cost', cost_result.success, cost_result.message, final_res['orderNo'], final_res.get('sapAmountVat', ''))
                     if not cost_result.success:
                         return _legacy_result(
                             cost_result,
@@ -1414,6 +1454,7 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                 if guiData.get('vf01Check') or guiData.get('saveCheck'):
                     # 创建发票或结束流程前，先保存 VA02。
                     save_result = service.save('VA02')
+                    _add_step('Save VA02', save_result.success, save_result.message, final_res['orderNo'], final_res.get('sapAmountVat', ''))
                     if not save_result.success:
                         return _legacy_result(
                             save_result,
@@ -1421,14 +1462,17 @@ class MyMainWindow(QMainWindow, Ui_MainWindow):
                             sapAmountVat=final_res.get('sapAmountVat', ''),
                         )
 
-            return final_res
+            return _attach_log(final_res)
         except Exception as exc:
+            _add_step('SAP操作', False, str(exc))
             return {
                 'flag': 0,
                 'msg': f'VA01调用失败：{exc}',
                 'orderNo': '',
                 'Proforma No.': '',
                 'sapAmountVat': '',
+                'steps': list(operation_steps),
+                'Remark': _format_steps_remark(),
             }
         finally:
             if own_session and sap_session is not None:
