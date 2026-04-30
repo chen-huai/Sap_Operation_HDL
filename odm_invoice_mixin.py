@@ -26,6 +26,7 @@ from Revenue_Operate import *
 from auto_updater.config_constants import CURRENT_VERSION
 from auto_updater import AutoUpdater, UI_AVAILABLE
 from sap import CostOptions, OrderData, OrderService, PartnerOptions, RevenueData, SapConfig, SapSession
+from runtime_globals import configContent, desktopUrl, myTable, myWin, today
 
 class OdmInvoiceMixin:
     def getFile(self, path):
