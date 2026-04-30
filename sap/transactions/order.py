@@ -46,6 +46,7 @@ class OrderTransaction:
             self.session.set_text("wnd[0]/usr/ctxtVBAK-VKORG", self.config.sales_organization)
             self.session.set_text("wnd[0]/usr/ctxtVBAK-VTWEG", self.config.distribution_channels)
             self.session.set_text("wnd[0]/usr/ctxtVBAK-VKBUR", self.config.sales_office)
+            # TODO 这个位置应该是订单信息的，如果订单信息没有该字段，使用默认的
             self.session.set_text("wnd[0]/usr/ctxtVBAK-VKGRP", self.config.cost_center)
             self.session.send_vkey(0)
 

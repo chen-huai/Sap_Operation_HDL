@@ -309,6 +309,7 @@ class SapOrderMixin:
         
         return revenueData
     def sap_operate(self, guiData=None, revenueData=None, sap_obj=None, include_followup=True):
+        direct_gui_call = not isinstance(guiData, dict) and not isinstance(revenueData, dict) and sap_obj is None
         # 主按钮使用的统一 SAP 订单流程。
         # include_followup=False 用于兼容旧的 sapOperate()；
         # 旧流程仍会单独执行 Data B、VA02、发票等后续步骤。
@@ -349,6 +350,31 @@ class SapOrderMixin:
             data['Remark'] = _format_steps_remark()
             return data
 
+        def _html_escape(value):
+            return str(value or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+        def _finish(data):
+            data = _attach_log(data)
+            if direct_gui_call and hasattr(self, 'textBrowser'):
+                if data.get('flag') == 0:
+                    message = data.get('msg') or data.get('Remark') or 'SAP operation failed.'
+                    self.textBrowser.append("<font color='red'>SAP Error: %s</font>" % _html_escape(message))
+                    for step in data.get('steps', []):
+                        if step.get('status') == 'failed':
+                            detail = "%s: %s" % (step.get('step', ''), step.get('msg', ''))
+                            self.textBrowser.append("<font color='red'>%s</font>" % _html_escape(detail))
+                    self.textBrowser.append('----------------------------------')
+                    QApplication.processEvents()
+                    QMessageBox.warning(self, "SAP Error", str(message), QMessageBox.Yes)
+                else:
+                    order_no = data.get('orderNo') or ''
+                    if order_no:
+                        self.textBrowser.append("Order No.:%s" % order_no)
+                    self.textBrowser.append('SAP operation completed.')
+                    self.textBrowser.append('----------------------------------')
+                    QApplication.processEvents()
+            return data
+
         def _legacy_result(result, **extra):
             # 保持旧 GUI 日志代码需要的返回结构。
             data = {
@@ -359,7 +385,7 @@ class SapOrderMixin:
                 'sapAmountVat': getattr(result, 'sap_amount_vat', '') or '',
             }
             data.update(extra)
-            return _attach_log(data)
+            return data
 
         def _extract_order_no(session):
             # 优先读取订单号字段；保存后再从状态栏兜底提取订单号。
@@ -472,14 +498,14 @@ class SapOrderMixin:
                 _add_step('VA01', result.success, result.message, result.order_no, result.sap_amount_vat)
                 final_res = _legacy_result(result)
                 if not result.success or not include_followup:
-                    return final_res
+                    return _finish(final_res)
 
                 if guiData.get('labCostCheck'):
                     # 步骤 2：Data B 在订单抬头写入 lab cost 行。
                     data_b_result = service.fill_lab_cost(order, revenue)
                     _add_step('Data B', data_b_result.success, data_b_result.message, final_res['orderNo'])
                     if not data_b_result.success:
-                        return _legacy_result(data_b_result, orderNo=final_res['orderNo'])
+                        return _finish(_legacy_result(data_b_result, orderNo=final_res['orderNo']))
                     if data_b_result.message:
                         final_res['msg'] = data_b_result.message
 
@@ -491,7 +517,7 @@ class SapOrderMixin:
                     if sap_obj is not None and hasattr(sap_obj, 'current_order_no'):
                         sap_obj.current_order_no = order_no or getattr(sap_obj, 'current_order_no', '')
                     if not save_result.success:
-                        return _legacy_result(save_result, orderNo=order_no or final_res['orderNo'])
+                        return _finish(_legacy_result(save_result, orderNo=order_no or final_res['orderNo']))
                     final_res['orderNo'] = order_no or final_res['orderNo']
 
             if include_followup and guiData.get('va02Check'):
@@ -503,7 +529,7 @@ class SapOrderMixin:
                 )
                 if not order_no:
                     _add_step('VA02', False, '未找到可用于VA02的Order No.')
-                    return {
+                    return _finish({
                         'flag': 0,
                         'msg': '未找到可用于VA02的Order No.',
                         'orderNo': '',
@@ -511,12 +537,12 @@ class SapOrderMixin:
                         'sapAmountVat': final_res.get('sapAmountVat', ''),
                         'steps': list(operation_steps),
                         'Remark': _format_steps_remark(),
-                    }
+                    })
 
                 open_result = service.open_order(order_no)
                 _add_step('Open VA02', open_result.success, open_result.message, order_no, final_res.get('sapAmountVat', ''))
                 if not open_result.success:
-                    return _legacy_result(open_result, orderNo=order_no, sapAmountVat=final_res.get('sapAmountVat', ''))
+                    return _finish(_legacy_result(open_result, orderNo=order_no, sapAmountVat=final_res.get('sapAmountVat', '')))
 
                 item_result = service.add_items(order, revenue)
                 _add_step('VA02', item_result.success, item_result.message, item_result.order_no or order_no, item_result.sap_amount_vat)
@@ -524,7 +550,7 @@ class SapOrderMixin:
                 if sap_obj is not None and hasattr(sap_obj, 'current_order_no'):
                     sap_obj.current_order_no = final_res['orderNo']
                 if not item_result.success:
-                    return final_res
+                    return _finish(final_res)
 
                 if guiData.get('planCostCheck'):
                     # 步骤 4：Plan Cost 为可选操作，并按 CS/CHM/PHY 勾选项执行。
@@ -539,11 +565,11 @@ class SapOrderMixin:
                     )
                     _add_step('Plan Cost', cost_result.success, cost_result.message, final_res['orderNo'], final_res.get('sapAmountVat', ''))
                     if not cost_result.success:
-                        return _legacy_result(
+                        return _finish(_legacy_result(
                             cost_result,
                             orderNo=final_res['orderNo'],
                             sapAmountVat=final_res.get('sapAmountVat', ''),
-                        )
+                        ))
                     if cost_result.message:
                         final_res['msg'] = cost_result.message
 
@@ -552,16 +578,16 @@ class SapOrderMixin:
                     save_result = service.save('VA02')
                     _add_step('Save VA02', save_result.success, save_result.message, final_res['orderNo'], final_res.get('sapAmountVat', ''))
                     if not save_result.success:
-                        return _legacy_result(
+                        return _finish(_legacy_result(
                             save_result,
                             orderNo=final_res['orderNo'],
                             sapAmountVat=final_res.get('sapAmountVat', ''),
-                        )
+                        ))
 
-            return _attach_log(final_res)
+            return _finish(final_res)
         except Exception as exc:
             _add_step('SAP操作', False, str(exc))
-            return {
+            return _finish({
                 'flag': 0,
                 'msg': f'VA01调用失败：{exc}',
                 'orderNo': '',
@@ -569,7 +595,7 @@ class SapOrderMixin:
                 'sapAmountVat': '',
                 'steps': list(operation_steps),
                 'Remark': _format_steps_remark(),
-            }
+            })
         finally:
             if own_session and sap_session is not None:
                 sap_session.close()
