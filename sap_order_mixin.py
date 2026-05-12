@@ -25,7 +25,7 @@ from theme_manager_theme import ThemeManager
 from Revenue_Operate import *
 from auto_updater.config_constants import CURRENT_VERSION
 from auto_updater import AutoUpdater, UI_AVAILABLE
-from sap import CostOptions, OrderData, OrderService, PartnerOptions, RevenueData, SapConfig, SapSession
+from sap import CostOptions, OrderData, OrderItemData, OrderService, PartnerOptions, RevenueData, SapConfig, SapSession
 from runtime_globals import configContent
 
 class SapOrderMixin:
@@ -321,6 +321,30 @@ class SapOrderMixin:
             except (TypeError, ValueError):
                 return default
 
+        def _to_str(value):
+            if value is None:
+                return ''
+            return str(value).strip()
+
+        def _build_order_items(data):
+            raw_items = data.get('items') or []
+            items = []
+            if isinstance(raw_items, list):
+                for raw_item in raw_items:
+                    if not isinstance(raw_item, dict):
+                        continue
+                    material_code = _to_str(raw_item.get('material_code', raw_item.get('materialCode')))
+                    if not material_code:
+                        continue
+                    items.append(OrderItemData(
+                        item=_to_str(raw_item.get('item')),
+                        material_code=material_code,
+                        revenue=_to_float(raw_item.get('revenue', raw_item.get('amount'))),
+                        quantity=_to_str(raw_item.get('quantity')) or '1',
+                        unit=_to_str(raw_item.get('unit')) or 'pu',
+                    ))
+            return items
+
         # 存放本次 SAP 操作的结构化步骤日志。
         operation_steps = []
 
@@ -454,6 +478,7 @@ class SapOrderMixin:
                 global_partner_code=str(guiData.get('globalPartnerCode', '')).strip(),
                 sales_name=str(guiData.get('salesName', '')).strip(),
                 ecd=time.strftime("%Y.%m.%d"),
+                items=_build_order_items(guiData),
             )
 
             revenue = RevenueData(

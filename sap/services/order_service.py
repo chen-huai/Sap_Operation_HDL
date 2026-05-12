@@ -30,6 +30,10 @@ class OrderService:
         """为当前订单添加 item。"""
         return self.transaction.add_items(order, revenue)
 
+    def update_items(self, order: OrderData, revenue: RevenueData) -> SapResult:
+        """更新当前订单 item。"""
+        return self.transaction.update_items(order, revenue)
+
     def fill_lab_cost(self, order: OrderData, revenue: RevenueData) -> SapResult:
         """填写 Data B 的人工成本。"""
         return self.transaction.fill_lab_cost(order, revenue)

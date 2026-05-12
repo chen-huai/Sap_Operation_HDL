@@ -17,6 +17,7 @@ from sap import (
     RevenueData,
     SapConfig,
     SapSession,
+    OrderItemData,
 )
 
 
@@ -118,6 +119,7 @@ class Sap:
         )
 
     def _build_order(self, gui_data: dict[str, Any]) -> OrderData:
+        items = self._build_order_items(gui_data)
         return OrderData(
             sap_no=self._as_str(gui_data.get("sapNo")),
             project_no=self._as_str(gui_data.get("projectNo")),
@@ -131,7 +133,29 @@ class Sap:
             global_partner_code=self._as_str(gui_data.get("globalPartnerCode")),
             sales_name=self._as_str(gui_data.get("salesName")),
             ecd=self._as_str(gui_data.get("ecd")) or time.strftime("%Y.%m.%d"),
+            items=items,
         )
+
+    def _build_order_items(self, gui_data: dict[str, Any]) -> list[OrderItemData]:
+        raw_items = gui_data.get("items") or []
+        items: list[OrderItemData] = []
+        if isinstance(raw_items, list):
+            for raw_item in raw_items:
+                if not isinstance(raw_item, dict):
+                    continue
+                material_code = self._as_str(raw_item.get("material_code", raw_item.get("materialCode")))
+                if not material_code:
+                    continue
+                items.append(
+                    OrderItemData(
+                        item=self._as_str(raw_item.get("item")),
+                        material_code=material_code,
+                        revenue=self._as_float(raw_item.get("revenue", raw_item.get("amount"))),
+                        quantity=self._as_str(raw_item.get("quantity")) or "1",
+                        unit=self._as_str(raw_item.get("unit")) or "pu",
+                    )
+                )
+        return items
 
     def _build_revenue(self, gui_data: dict[str, Any], revenue_data: dict[str, Any]) -> RevenueData:
         return RevenueData(

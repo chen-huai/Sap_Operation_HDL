@@ -1,11 +1,11 @@
-"""订单事务。"""
+﻿"""Order transactions."""
 
 from __future__ import annotations
 
 import re
 import time
 
-from sap.models import CostOptions, OrderData, PartnerOptions, RevenueData, SapConfig, SapResult
+from sap.models import CostOptions, OrderData, OrderItemData, PartnerOptions, RevenueData, SapConfig, SapResult
 from sap.rules import (
     build_fremdl_entry,
     build_lab_cost_entries,
@@ -23,30 +23,29 @@ from sap.session import SapSession
 
 
 class OrderTransaction:
-    """订单事务，封装 VA01/VA02 及相关页面操作。"""
+    """Encapsulate VA01/VA02 order operations."""
 
     def __init__(self, session: SapSession, config: SapConfig):
-        """注入共享会话和固定配置。"""
+        """Initialize with shared SAP session and config."""
         self.session = session
         self.config = config
 
     @property
     def today(self) -> str:
-        """按 SAP 常用格式输出当天日期。"""
+        """Return today in SAP date format."""
         return time.strftime("%Y.%m.%d")
 
     def create(self, order: OrderData, revenue: RevenueData, options: PartnerOptions) -> SapResult:
-        """执行 VA01 订单头创建。"""
+        """Create order header in VA01."""
         result = SapResult(step="va01")
         try:
-            # VA01 头部数据写入。
-            self.session.set_text("wnd[0]/tbar[0]/okcd", "/nva01")
+            # VA01 澶撮儴鏁版嵁鍐欏叆銆?            self.session.set_text("wnd[0]/tbar[0]/okcd", "/nva01")
             self.session.send_vkey(0)
             self.session.set_text("wnd[0]/usr/ctxtVBAK-AUART", self.config.order_type)
             self.session.set_text("wnd[0]/usr/ctxtVBAK-VKORG", self.config.sales_organization)
             self.session.set_text("wnd[0]/usr/ctxtVBAK-VTWEG", self.config.distribution_channels)
             self.session.set_text("wnd[0]/usr/ctxtVBAK-VKBUR", self.config.sales_office)
-            # TODO 这个位置应该是订单信息的，如果订单信息没有该字段，使用默认的
+            # TODO 杩欎釜浣嶇疆搴旇鏄鍗曚俊鎭殑锛屽鏋滆鍗曚俊鎭病鏈夎瀛楁锛屼娇鐢ㄩ粯璁ょ殑
             self.session.set_text("wnd[0]/usr/ctxtVBAK-VKGRP", self.config.cost_center)
             self.session.send_vkey(0)
 
@@ -101,8 +100,7 @@ class OrderTransaction:
             self._fill_partners(order, options)
             self._fill_header_text(order)
 
-            # DATA A / DATA B 是订单头上的两组业务字段。
-            self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\13")
+            # DATA A / DATA B 鏄鍗曞ご涓婄殑涓ょ粍涓氬姟瀛楁銆?            self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\13")
             self.session.set_key(
                 "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\13/"
                 "ssubSUBSCREEN_BODY:SAPMV45A:4309/cmbVBAK-KVGR1",
@@ -132,11 +130,11 @@ class OrderTransaction:
                     format(revenue.revenue_cny, ".2f"),
                 )
         except Exception as exc:
-            return SapResult.fail(f"Order No未创建成功，{exc}", step="va01")
+            return SapResult.fail(f"Order No鏈垱寤烘垚鍔燂紝{exc}", step="va01")
         return result
 
     def _fill_partners(self, order: OrderData, options: PartnerOptions) -> None:
-        """填写合作伙伴页签。"""
+        """Fill partner tab."""
         self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\09")
         partner_prefix = (
             "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\09/"
@@ -144,9 +142,7 @@ class OrderTransaction:
             "SAPLV09C:1000/tblSAPLV09CGV_TC_PARTNER_OVERVIEW"
         )
         four_name = self.session.read_text(f"{partner_prefix}/cmbGVS_TC_DATA-REC-PARVW[0,4]")
-        # 不同语言或模板下“负责雇员/送达方”的行号会互换，先探测再写值。
-        # TODO 这个可能有所改变具体看看情况，是否要增加，还有就是位置是否正确
-        e_row, g_row = (4, 5) if four_name in {"负责雇员", "Employee respons."} else (5, 4)
+        e_row, g_row = (4, 5) if four_name in {"璐熻矗闆囧憳", "Employee respons."} else (5, 4)
 
         self.session.set_key(f"{partner_prefix}/cmbGVS_TC_DATA-REC-PARVW[0,{g_row}]", "ZG")
         self.session.set_text(f"{partner_prefix}/ctxtGVS_TC_DATA-REC-PARTNER[1,{g_row}]", order.global_partner_code)
@@ -169,7 +165,7 @@ class OrderTransaction:
             self.session.send_vkey(0)
 
     def _fill_header_text(self, order: OrderData) -> None:
-        """填写订单头短文本。"""
+        """Fill order header short text."""
         self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\10")
         text_id = (
             "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\10/"
@@ -180,7 +176,7 @@ class OrderTransaction:
             "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\10/"
             "ssubSUBSCREEN_BODY:SAPMV45A:4152/subSUBSCREEN_TEXT:SAPLV70T:2100/cmbLV70T-SPRAS"
         )
-        # TODO 同样的应该是直接更新为最新的文本内容
+        # TODO 鍚屾牱鐨勫簲璇ユ槸鐩存帴鏇存柊涓烘渶鏂扮殑鏂囨湰鍐呭
         self.session.set_text(text_id, order.short_text)
         self.session.set_selection_indexes(text_id, 11, 11)
         self.session.set_key(lang_id, "EN")
@@ -188,11 +184,10 @@ class OrderTransaction:
         self.session.send_vkey(0)
 
     def fill_lab_cost(self, order: OrderData, revenue: RevenueData) -> SapResult:
-        """按规则计算并写入 Data B 人工成本。"""
+        """Write Data B labor cost."""
         result = SapResult(step="lab_cost")
         try:
             entries = build_lab_cost_entries(order, revenue, self.config)
-            # TODO 这个同样是根据订单变化数据
             for entry in entries:
                 self.session.set_text(
                     f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
@@ -210,16 +205,15 @@ class OrderTransaction:
                     entry.amount,
                 )
         except Exception as exc:
-            return SapResult.fail(f"Data B未填写，{exc}", step="lab_cost")
+            return SapResult.fail(f"Data B鏈～鍐欙紝{exc}", step="lab_cost")
         return result
 
     def save(self, info: str) -> SapResult:
-        """保存当前订单相关页面，并通过状态栏判断结果。"""
+        """Save current order page and verify status."""
         result = SapResult(step="save")
         save_error: Exception | None = None
         try:
-            # 现有业务页面保存前通常需要先回退到可确认的层级。
-            self.session.press("wnd[0]/tbar[0]/btn[3]")
+            # 鐜版湁涓氬姟椤甸潰淇濆瓨鍓嶉€氬父闇€瑕佸厛鍥為€€鍒板彲纭鐨勫眰绾с€?            self.session.press("wnd[0]/tbar[0]/btn[3]")
             self.session.press("wnd[0]/tbar[0]/btn[3]")
             self.session.press("wnd[1]/usr/btnSPOP-OPTION1")
         except Exception as exc:
@@ -242,20 +236,20 @@ class OrderTransaction:
         try:
             save_msg = self.session.read_status()
         except Exception as exc:
-            message = f"{info}保存失败，无法读取状态栏: {exc}"
+            message = f"{info}淇濆瓨澶辫触锛屾棤娉曡鍙栫姸鎬佹爮: {exc}"
             if save_error:
-                message += f"；保存操作异常: {save_error}"
+                message += f"锛涗繚瀛樻搷浣滃紓甯? {save_error}"
             return SapResult.fail(message, step="save")
 
-        if "已保存" not in save_msg and "saved" not in save_msg:
+        if "saved" not in save_msg.lower() and "保存" not in save_msg:
             message = f"{info}保存失败，{save_msg}"
             if save_error:
-                message += f"；保存操作异常: {save_error}"
+                message += f"锛涗繚瀛樻搷浣滃紓甯? {save_error}"
             return SapResult.fail(message, step="save")
         return result
 
     def open(self, order_no: str) -> SapResult:
-        """进入 VA02 并打开指定订单。"""
+        """Open an existing order in VA02."""
         result = SapResult(step="open_va02")
         try:
             self.session.set_text("wnd[0]/tbar[0]/okcd", "/NVA02")
@@ -263,63 +257,81 @@ class OrderTransaction:
             self.session.set_text("wnd[0]/usr/ctxtVBAK-VBELN", order_no)
             self.session.send_vkey(0)
         except Exception as exc:
-            return SapResult.fail(f"该Order No {order_no} 未开启，{exc}", step="open_va02")
+            return SapResult.fail(f"璇rder No {order_no} 鏈紑鍚紝{exc}", step="open_va02")
         return result
 
     def add_items(self, order: OrderData, revenue: RevenueData) -> SapResult:
-        """在当前订单中新增 item 并写入金额。"""
+        """Add item rows to current order."""
         result = SapResult(step="va02")
         try:
             order_no = self.session.read_text("wnd[0]/usr/ctxtVBAK-VBELN")
             result.order_no = order_no
+            result.sap_amount_vat = self._write_item_rows(order)
+            return result
 
-            if is_a2_material(order.material_code):
-                # A2 物料会拆成两个 item，分别承载 PHY / CHM 金额。
-                item1000, item2000 = resolve_a2_materials(order.material_code, self.config)
-                self._write_item_row(0, item1000)
-                self._write_item_row(1, item2000)
-                self.session.send_vkey(0)
-
-                if has_430_subcode(order.material_code):
-                    self.session.focus(self._material_id(0), 10)
-                else:
-                    self.session.focus(self._quantity_id(1), 16)
-                self.session.send_vkey(2)
-
-                sap_amount = self._write_item_condition(revenue.phy_revenue)
-                self.session.press("wnd[0]/tbar[0]/btn[3]")
-
-                if has_430_subcode(order.material_code):
-                    self.session.focus(self._quantity_id(1), 16)
-                else:
-                    self.session.focus(self._material_id(0), 10)
-                self.session.send_vkey(2)
-
-                sap_amount += self._parse_amount(self._write_item_condition(revenue.chm_revenue))
-                result.sap_amount_vat = self._format_amount(sap_amount)
-            else:
-                # 普通物料只维护单 item。
-                self._write_item_row(0, order.material_code)
-                self.session.send_vkey(0)
-                self.session.focus(self._material_id(0), 10)
-                self.session.send_vkey(2)
-                result.sap_amount_vat = self._write_item_condition(format(revenue.revenue, ".2f"))
-
-            if order.long_text:
-                self._write_item_long_text(order.long_text, result)
         except Exception as exc:
-            return SapResult.fail(f"Order添加Item失败，{exc}", step="va02")
+            return SapResult.fail(f"Order add item failed: {exc}", step="va02")
         return result
 
-    def _write_item_row(self, row: int, material_code: str) -> None:
-        """写入某一行 item 的物料、数量和单位。"""
-        self.session.set_text(self._material_id(row), material_code)
-        self.session.set_text(self._quantity_id(row), "1")
-        self.session.set_text(self._unit_id(row), "pu")
+    def update_items(self, order: OrderData, revenue: RevenueData) -> SapResult:
+        """Update current order items after VA02 is open."""
+        result = SapResult(step="va02_update")
+        try:
+            result.order_no = self.session.read_text("wnd[0]/usr/ctxtVBAK-VBELN")
+            result.sap_amount_vat = self._write_item_rows(order)
+        except Exception as exc:
+            return SapResult.fail(f"Order update item failed: {exc}", step="va02_update")
+        return result
+
+    def _resolve_order_items(self, order: OrderData) -> list[OrderItemData]:
+        items = [item for item in order.items if item.material_code]
+        if not items:
+            raise ValueError("order.items is required")
+        return items
+
+    def _write_item_rows(self, order: OrderData) -> str:
+        items = self._resolve_order_items(order)
+        sap_amount_total = 0.0
+        sap_amount_text = ""
+
+        for row, item in enumerate(items):
+            self._write_item_row(row, item)
+        self.session.send_vkey(0)
+
+        for row, item in enumerate(items):
+            self.session.focus(self._material_id(row), 10)
+            self.session.send_vkey(2)
+            amount_text = self._write_item_condition(format(item.revenue, ".2f"))
+            sap_amount_text = amount_text
+            sap_amount_total += self._parse_amount(amount_text)
+            if order.long_text and row == 0:
+                self._write_item_long_text(order.long_text, SapResult())
+            self.session.press("wnd[0]/tbar[0]/btn[3]")
+
+        if len(items) > 1:
+            return self._format_amount(sap_amount_total)
+        return sap_amount_text
+
+    def _write_item_row(self, row: int, item: OrderItemData) -> None:
+        """Write one item row."""
+        if item.item:
+            self.session.set_text(self._item_id(row), item.item)
+        self.session.set_text(self._material_id(row), item.material_code)
+        self.session.set_text(self._quantity_id(row), item.quantity)
+        self.session.set_text(self._unit_id(row), item.unit)
+
+    @staticmethod
+    def _item_id(row: int) -> str:
+        """Return item number field id for row."""
+        return (
+            "wnd[0]/usr/tabsTAXI_TABSTRIP_OVERVIEW/tabpT\\02/"
+            "ssubSUBSCREEN_BODY:SAPMV45A:4415/subSUBSCREEN_TC:SAPMV45A:4902/"
+            f"tblSAPMV45ATCTRL_U_ERF_GUTLAST/txtVBAP-POSNR[0,{row}]"
+        )
 
     @staticmethod
     def _material_id(row: int) -> str:
-        """返回指定行的物料字段 ID。"""
+        """Return material field id for row."""
         return (
             "wnd[0]/usr/tabsTAXI_TABSTRIP_OVERVIEW/tabpT\\02/"
             "ssubSUBSCREEN_BODY:SAPMV45A:4415/subSUBSCREEN_TC:SAPMV45A:4902/"
@@ -328,7 +340,7 @@ class OrderTransaction:
 
     @staticmethod
     def _quantity_id(row: int) -> str:
-        """返回指定行的数量字段 ID。"""
+        """Return quantity field id for row."""
         return (
             "wnd[0]/usr/tabsTAXI_TABSTRIP_OVERVIEW/tabpT\\02/"
             "ssubSUBSCREEN_BODY:SAPMV45A:4415/subSUBSCREEN_TC:SAPMV45A:4902/"
@@ -337,7 +349,7 @@ class OrderTransaction:
 
     @staticmethod
     def _unit_id(row: int) -> str:
-        """返回指定行的单位字段 ID。"""
+        """Return unit field id for row."""
         return (
             "wnd[0]/usr/tabsTAXI_TABSTRIP_OVERVIEW/tabpT\\02/"
             "ssubSUBSCREEN_BODY:SAPMV45A:4415/subSUBSCREEN_TC:SAPMV45A:4902/"
@@ -345,7 +357,7 @@ class OrderTransaction:
         )
 
     def _write_item_condition(self, value) -> str:
-        """进入 item 条件页签并写入金额。"""
+        """Open item condition tab and write amount."""
         condition_id = (
             "wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\06/"
             "ssubSUBSCREEN_BODY:SAPLV69A:6201/tblSAPLV69ATCTRL_KONDITIONEN/"
@@ -355,11 +367,10 @@ class OrderTransaction:
         self.session.set_text(condition_id, value)
         self.session.focus(condition_id, 16)
         self.session.send_vkey(0)
-        # SAP 会在回车后重算并刷新条件金额，返回刷新后的文本用于后续汇总。
         return self.session.read_text(condition_id)
 
     def _write_item_long_text(self, long_text: str, result: SapResult) -> None:
-        """写入 item 长文本。"""
+        """Write item long text."""
         text_id = (
             "wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\09/"
             "ssubSUBSCREEN_BODY:SAPMV45A:4152/subSUBSCREEN_TEXT:SAPLV70T:2100/"
@@ -378,28 +389,27 @@ class OrderTransaction:
             self.session.send_vkey(0)
             self.session.set_selection_indexes(text_id, 0, 0)
         except Exception:
-            result.append_message("Long Text 添加失败")
+            result.append_message("Long Text 娣诲姞澶辫触")
 
     @staticmethod
     def _parse_amount(amount_text: str) -> float:
-        """把 SAP 金额文本转成浮点数。"""
+        """Parse SAP amount text."""
         return float(amount_text.replace(",", ""))
 
     @staticmethod
     def _format_amount(amount: float) -> str:
-        """把金额格式化成 SAP 常见的千分位字符串。"""
+        """Format amount with thousands separators."""
         return re.sub(r"(\d)(?=(\d\d\d)+(?!\d))", r"\1,", format(amount, ".2f"))
 
     def apply_plan_cost(self, order: OrderData, revenue: RevenueData, options: CostOptions) -> SapResult:
-        """按物料类型写入计划成本。"""
+        """Apply plan cost by material type."""
         result = SapResult(step="plan_cost")
         try:
             if not should_apply_plan_cost(revenue, self.config):
                 return result
 
             if is_d_split_material(order.material_code):
-                # D2/D3 是单 item + 拆分成本视图。
-                self.session.press("wnd[0]/tbar[0]/btn[3]")
+                # D2/D3 鏄崟 item + 鎷嗗垎鎴愭湰瑙嗗浘銆?                self.session.press("wnd[0]/tbar[0]/btn[3]")
                 self._open_plan_cost_editor(self._material_id(0))
                 entries = build_split_plan_cost_entries(revenue, self.config, options)
                 next_row = self._apply_plan_cost_entries(entries)
@@ -411,8 +421,7 @@ class OrderTransaction:
                 return result
 
             if is_a2_material(order.material_code):
-                # A2 需要分别进入两个 item 的计划成本界面。
-                self.session.press("wnd[0]/tbar[0]/btn[3]")
+                # A2 闇€瑕佸垎鍒繘鍏ヤ袱涓?item 鐨勮鍒掓垚鏈晫闈€?                self.session.press("wnd[0]/tbar[0]/btn[3]")
                 first_target = self._material_id(0) if has_430_subcode(order.material_code) else self._material_id(1)
                 second_target = self._material_id(1) if has_430_subcode(order.material_code) else self._material_id(0)
 
@@ -435,8 +444,7 @@ class OrderTransaction:
                         row += 1
                 next_row = self._apply_plan_cost_entries(first_entries)
                 if has_430_subcode(order.material_code):
-                    # 430 子码的外包成本挂在第一段计划成本里。
-                    fremdl_entry = build_fremdl_entry(next_row, order, self.config)
+                    # 430 瀛愮爜鐨勫鍖呮垚鏈寕鍦ㄧ涓€娈佃鍒掓垚鏈噷銆?                    fremdl_entry = build_fremdl_entry(next_row, order, self.config)
                     if fremdl_entry:
                         self._apply_single_plan_cost_entry(fremdl_entry)
                 self.session.press("wnd[0]/tbar[0]/btn[3]")
@@ -462,8 +470,7 @@ class OrderTransaction:
                         row += 1
                 next_row = self._apply_plan_cost_entries(second_entries)
                 if not has_430_subcode(order.material_code):
-                    # 非 430 子码则把外包成本挂到第二段。
-                    fremdl_entry = build_fremdl_entry(next_row, order, self.config)
+                    # 闈?430 瀛愮爜鍒欐妸澶栧寘鎴愭湰鎸傚埌绗簩娈点€?                    fremdl_entry = build_fremdl_entry(next_row, order, self.config)
                     if fremdl_entry:
                         self._apply_single_plan_cost_entry(fremdl_entry)
                 self.session.press("wnd[0]/tbar[0]/btn[3]")
@@ -480,29 +487,27 @@ class OrderTransaction:
             self.session.press("wnd[0]/tbar[0]/btn[3]")
             self.session.press("wnd[1]/usr/btnSPOP-OPTION1")
         except Exception as exc:
-            return SapResult.fail(f"plan cost未添加成功,{exc}", step="plan_cost")
+            return SapResult.fail(f"plan cost鏈坊鍔犳垚鍔?{exc}", step="plan_cost")
         return result
 
     def _open_plan_cost_editor(self, focus_element_id: str) -> None:
-        """打开当前焦点 item 的计划成本编辑界面。"""
+        """Open plan cost editor for focused item."""
         self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_OVERVIEW/tabpT\\02")
-        # 计划成本菜单依赖当前焦点 item，必须先把光标放到目标物料行。
-        self.session.focus(focus_element_id, 10)
+        # 璁″垝鎴愭湰鑿滃崟渚濊禆褰撳墠鐒︾偣 item锛屽繀椤诲厛鎶婂厜鏍囨斁鍒扮洰鏍囩墿鏂欒銆?        self.session.focus(focus_element_id, 10)
         self.session.find("wnd[0]/mbar/menu[3]/menu[7]").select()
         self.session.press("wnd[1]/usr/btnSPOP-VAROPTION1")
         self.session.press("wnd[1]/tbar[0]/btn[0]")
 
     def _apply_plan_cost_entries(self, entries) -> int:
-        """批量写入计划成本行，并返回下一可用行号。"""
+        """Apply plan cost entries and return next row."""
         row = 0
         for entry in entries:
             self._apply_single_plan_cost_entry(entry)
             row = entry.row + 1
-        # 返回下一可用行，供 FREMDL 这类附加项继续写入。
-        return row
+        # 杩斿洖涓嬩竴鍙敤琛岋紝渚?FREMDL 杩欑被闄勫姞椤圭户缁啓鍏ャ€?        return row
 
     def _apply_single_plan_cost_entry(self, entry) -> None:
-        """写入单条计划成本记录。"""
+        """Apply one plan cost entry."""
         self.session.set_text(f"wnd[0]/usr/tblSAPLKKDI1301_TC/ctxtRK70L-TYPPS[2,{entry.row}]", "E")
         self.session.set_text(
             f"wnd[0]/usr/tblSAPLKKDI1301_TC/ctxtRK70L-HERK2[3,{entry.row}]",
@@ -520,7 +525,7 @@ class OrderTransaction:
         self.session.send_vkey(0)
 
     def set_lock_state(self, *, unlocked: bool) -> SapResult:
-        """切换订单锁定状态。"""
+        """Switch order lock state."""
         result = SapResult(step="lock")
         action = "Unlock" if unlocked else "Lock"
         try:
@@ -571,5 +576,5 @@ class OrderTransaction:
             self.session.press("wnd[0]/tbar[0]/btn[11]")
             result.message = f"{action} 成功"
         except Exception as exc:
-            return SapResult.fail(f"{action} 未成功，{exc}", step="lock")
+            return SapResult.fail(f"{action} 鏈垚鍔燂紝{exc}", step="lock")
         return result

@@ -11,6 +11,7 @@ from sap.test.helpers import (
     make_partner_options,
     make_revenue,
 )
+from sap import OrderItemData
 
 
 PARTNER_TEXTS = {
@@ -57,15 +58,55 @@ class TestOrderServiceCreate:
 
 
 class TestOrderServiceItemAndCost:
-    def test_add_items_non_a2_material(self):
+    def test_add_items_requires_order_items(self):
         raw = create_raw_session(PARTNER_TEXTS)
         service = create_order_service(raw)
 
         result = service.add_items(make_order(material_code="T75-405-00"), make_revenue(revenue=10000.0))
 
+        assert not result.success
+        assert "order.items is required" in result.message
+
+    def test_add_items_uses_order_item_rows_without_split(self):
+        raw = create_raw_session(PARTNER_TEXTS)
+        service = create_order_service(raw)
+        order = make_order(
+            material_code="A2-405-00",
+            items=[
+                OrderItemData(item="1000", material_code="T75-405-00", revenue=4000.0),
+                OrderItemData(item="2000", material_code="T20-405-00", revenue=6000.0),
+            ],
+        )
+
+        result = service.add_items(order, make_revenue(revenue=10000.0, chm_revenue=1.0, phy_revenue=2.0))
+
         assert result.success
-        assert result.order_no == "60001234"
-        assert result.sap_amount_vat == "10000.00"
+        assert result.sap_amount_vat == "10,000.00"
+        assert raw._cache[
+            "wnd[0]/usr/tabsTAXI_TABSTRIP_OVERVIEW/tabpT\\02/"
+            "ssubSUBSCREEN_BODY:SAPMV45A:4415/subSUBSCREEN_TC:SAPMV45A:4902/"
+            "tblSAPMV45ATCTRL_U_ERF_GUTLAST/txtVBAP-POSNR[0,0]"
+        ].text == "1000"
+        assert raw._cache[
+            "wnd[0]/usr/tabsTAXI_TABSTRIP_OVERVIEW/tabpT\\02/"
+            "ssubSUBSCREEN_BODY:SAPMV45A:4415/subSUBSCREEN_TC:SAPMV45A:4902/"
+            "tblSAPMV45ATCTRL_U_ERF_GUTLAST/ctxtRV45A-MABNR[1,1]"
+        ].text == "T20-405-00"
+
+    def test_update_items_reuses_item_row_writer(self):
+        raw = create_raw_session(PARTNER_TEXTS)
+        service = create_order_service(raw)
+        order = make_order(items=[OrderItemData(item="1000", material_code="T75-441-00", revenue=1200.0)])
+
+        result = service.update_items(order, make_revenue())
+
+        assert result.success
+        assert result.step == "va02_update"
+        assert raw._cache[
+            "wnd[0]/usr/tabsTAXI_TABSTRIP_OVERVIEW/tabpT\\02/"
+            "ssubSUBSCREEN_BODY:SAPMV45A:4415/subSUBSCREEN_TC:SAPMV45A:4902/"
+            "tblSAPMV45ATCTRL_U_ERF_GUTLAST/ctxtRV45A-MABNR[1,0]"
+        ].text == "T75-441-00"
 
     def test_apply_plan_cost_below_threshold_no_editor_open(self):
         raw = create_raw_session(PARTNER_TEXTS)

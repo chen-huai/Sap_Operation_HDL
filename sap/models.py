@@ -42,6 +42,17 @@ class SapConfig:
 
 
 @dataclass(slots=True)
+class OrderItemData:
+    """Order item row data for VA02."""
+
+    item: str = ""
+    material_code: str = ""
+    revenue: float = 0.0
+    quantity: str = "1"
+    unit: str = "pu"
+
+
+@dataclass(slots=True)
 class OrderData:
     """订单业务数据。"""
 
@@ -69,6 +80,8 @@ class OrderData:
     sales_name: str = ""
     # 预计完成日期。
     ecd: str = ""
+
+    items: list[OrderItemData] = field(default_factory=list)
 
 
 @dataclass(slots=True)
