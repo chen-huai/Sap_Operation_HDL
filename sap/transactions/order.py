@@ -145,6 +145,7 @@ class OrderTransaction:
         )
         four_name = self.session.read_text(f"{partner_prefix}/cmbGVS_TC_DATA-REC-PARVW[0,4]")
         # 不同语言或模板下“负责雇员/送达方”的行号会互换，先探测再写值。
+        # TODO 这个可能有所改变具体看看情况，是否要增加，还有就是位置是否正确
         e_row, g_row = (4, 5) if four_name in {"负责雇员", "Employee respons."} else (5, 4)
 
         self.session.set_key(f"{partner_prefix}/cmbGVS_TC_DATA-REC-PARVW[0,{g_row}]", "ZG")
@@ -179,6 +180,7 @@ class OrderTransaction:
             "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\10/"
             "ssubSUBSCREEN_BODY:SAPMV45A:4152/subSUBSCREEN_TEXT:SAPLV70T:2100/cmbLV70T-SPRAS"
         )
+        # TODO 同样的应该是直接更新为最新的文本内容
         self.session.set_text(text_id, order.short_text)
         self.session.set_selection_indexes(text_id, 11, 11)
         self.session.set_key(lang_id, "EN")
@@ -190,6 +192,7 @@ class OrderTransaction:
         result = SapResult(step="lab_cost")
         try:
             entries = build_lab_cost_entries(order, revenue, self.config)
+            # TODO 这个同样是根据订单变化数据
             for entry in entries:
                 self.session.set_text(
                     f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
