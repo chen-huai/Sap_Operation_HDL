@@ -82,7 +82,6 @@ class OdmInvoiceMixin:
                 self.comboBox.setCurrentIndex(0)
                 self.comboBox_2.setCurrentIndex(0)
                 self.comboBox_3.setCurrentIndex(0)
-                self.comboBox_4.setCurrentIndex(0)
                 # log文件
                 logFileUrl = '%s/log' % filepath
                 self.__class__.createFolder(self, logFileUrl)
@@ -142,6 +141,7 @@ class OdmInvoiceMixin:
                             break
                         else:
                             materialCode = fileDataList['Material Code'][n]
+                        self.current_material_code = materialCode
                         self.lineEdit_2.setText(str(fileDataList['Project No.'][n]))
                         self.lineEdit_3.setText(str(int(fileDataList['GPC Glo. Par. Code'][n])))
                         self.textBrowser.append("No.:%s" % (n + 1))
@@ -158,8 +158,8 @@ class OdmInvoiceMixin:
                         else:
                             pass
                         # materialCodeList = ['', 'T75-441-A2', 'T75-405-A2', 'T20-441-00', 'T20-405-00', 'T75-441-00', 'T75-405-00', 'T75-441-D2', 'T75-405-D2', 'S11-441-10', 'S11-405-10']
-                        # self.comboBox_4.setCurrentIndex(username.index(materialCode))
                         QApplication.processEvents()
+                        # TODO 需要将MC改为订单信息
                         self.comboBox_4.setItemText(int(0), materialCode)
 
                         if fileDataList['CS'][n] in configContent:
@@ -188,15 +188,17 @@ class OdmInvoiceMixin:
                                 pass
                         else:
                             self.lineEdit_5.setText('Testing Fee')
+
+                        # TODO 需要将text改为订单信息
                         if 'Long Text' in headList:
                             try:
-                                self.lineEdit_4.setText(fileDataList['Long Text'][n])
+                                self.current_long_text = fileDataList['Long Text'][n]
                             except:
-                                self.lineEdit_4.clear()
+                                self.current_long_text = ''
                             else:
                                 pass
                         else:
-                            self.lineEdit_4.clear()
+                            self.current_long_text = ''
                         QApplication.processEvents()
                         logMsg = self.__class__.sapOperate(self, sap_obj)
                         # 写log

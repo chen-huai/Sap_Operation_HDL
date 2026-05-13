@@ -379,7 +379,6 @@ class ConfigMixin:
         guiData = {}
         guiData['sapNo'] = self.lineEdit.text()
         guiData['projectNo'] = self.lineEdit_2.text()
-        guiData['materialCode'] = self.comboBox_4.currentText()
         guiData['currencyType'] = self.comboBox.currentText()
         guiData['exchangeRate'] = float(self.doubleSpinBox.text())
         guiData['globalPartnerCode'] = self.lineEdit_3.text()
@@ -398,8 +397,9 @@ class ConfigMixin:
         guiData['csHourlyRate'] = float(self.doubleSpinBox_5.text())
         guiData['chmHourlyRate'] = float(self.doubleSpinBox_6.text())
         guiData['phyHourlyRate'] = float(self.doubleSpinBox_8.text())
-        guiData['longText'] = self.lineEdit_4.text()
         guiData['shortText'] = self.lineEdit_5.text()
+        guiData['materialCode'] = getattr(self, 'current_material_code', '')
+        guiData['longText'] = getattr(self, 'current_long_text', '')
         guiData['planCostRate'] = float(self.doubleSpinBox_7.text())
         guiData['significantDigits'] = int(self.spinBox_5.text())
         guiData['chmCostRate'] = float(self.doubleSpinBox_9.text())
