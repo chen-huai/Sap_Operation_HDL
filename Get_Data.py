@@ -2,6 +2,12 @@ import pandas as pd
 import numpy as np
 from Excel_Field_Mapper import excel_field_mapper
 import ast
+from pathlib import Path
+
+
+SUPPORTED_EXCEL_EXTENSIONS = {'.xlsx', '.xls', '.xlsm'}
+
+
 class Get_Data():
     # def __init__(self,fileDataUrl):
     #     self.fileDataUrl = fileDataUrl
@@ -28,7 +34,7 @@ class Get_Data():
         修复：强制 Client Contact Name 相关列在读取时为字符串类型，避免 float64 类型错误
         """
         self.fileDataUrl = fileDataUrl
-        fileType = self.fileDataUrl.split(".")[-1]
+        fileType = Path(self.fileDataUrl).suffix.lower()
 
         # 定义需要强制为字符串类型的列（Client Contact Name 的所有可能列名变体）
         contact_columns = [
@@ -37,14 +43,16 @@ class Get_Data():
         ]
         dtype_dict = {col: 'str' for col in contact_columns}
 
-        if fileType == 'xlsx':
+        if fileType in SUPPORTED_EXCEL_EXTENSIONS:
             self.fileData = pd.read_excel(self.fileDataUrl, dtype=dtype_dict)
             # self.fileData = pd.read_excel(self.fileDataUrl, dtype='str')
             # self.fileData = pd.read_excel(self.fileDataUrl, keep_default_na=False)
-        elif fileType == 'csv':
+        elif fileType == '.csv':
             self.fileData = pd.read_csv(self.fileDataUrl, dtype=dtype_dict)
             # self.fileData = pd.read_csv(self.fileDataUrl, dtype='str')
             # self.fileData = pd.read_csv(self.fileDataUrl, keep_default_na=False)
+        else:
+            raise ValueError(f"Unsupported file type: {fileType}. Supported types: .xlsx, .xls, .xlsm, .csv")
         height, width = self.fileData.shape
 
         self.fileData = excel_field_mapper.transform_dataframe(self.fileData)
@@ -57,7 +65,7 @@ class Get_Data():
         修复：强制 Client Contact Name 相关列在读取时为字符串类型
         """
         self.fileDataUrl = fileDataUrl
-        fileType = self.fileDataUrl.split(".")[-1]
+        fileType = Path(self.fileDataUrl).suffix.lower()
 
         # 定义需要强制为字符串类型的列
         contact_columns = [
@@ -66,10 +74,12 @@ class Get_Data():
         ]
         dtype_dict = {col: 'str' for col in contact_columns}
 
-        if fileType == 'xlsx':
+        if fileType in SUPPORTED_EXCEL_EXTENSIONS:
             self.fileData = pd.read_excel(self.fileDataUrl, dtype=dtype_dict)
-        elif fileType == 'csv':
+        elif fileType == '.csv':
             self.fileData = pd.read_csv(self.fileDataUrl, dtype=dtype_dict)
+        else:
+            raise ValueError(f"Unsupported file type: {fileType}. Supported types: .xlsx, .xls, .xlsm, .csv")
         height, width = self.fileData.shape
 
         self.fileData = self._convert_datetime_to_str(self.fileData)
@@ -99,15 +109,17 @@ class Get_Data():
 
     def getMergeFileData(self, fileDataUrl):
         self.fileDataUrl = fileDataUrl
-        fileType = self.fileDataUrl.split(".")[-1]
-        if fileType == 'xlsx':
+        fileType = Path(self.fileDataUrl).suffix.lower()
+        if fileType in SUPPORTED_EXCEL_EXTENSIONS:
             # self.fileData = pd.read_excel(self.fileDataUrl)
             self.fileData = pd.read_excel(self.fileDataUrl, float_precision='round_trip', dtype='str')
             # self.fileData = pd.read_excel(self.fileDataUrl, keep_default_na=False)
-        elif fileType == 'csv':
+        elif fileType == '.csv':
             # self.fileData = pd.read_csv(self.fileDataUrl)
             self.fileData = pd.read_csv(self.fileDataUrl, dtype='str')
             # self.fileData = pd.read_csv(self.fileDataUrl, keep_default_na=False)
+        else:
+            raise ValueError(f"Unsupported file type: {fileType}. Supported types: .xlsx, .xls, .xlsm, .csv")
         height, width = self.fileData.shape
         self.fileData = self._convert_datetime_to_str(self.fileData)
         return self.fileData
