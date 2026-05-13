@@ -160,7 +160,6 @@ class OdmInvoiceMixin:
                         # materialCodeList = ['', 'T75-441-A2', 'T75-405-A2', 'T20-441-00', 'T20-405-00', 'T75-441-00', 'T75-405-00', 'T75-441-D2', 'T75-405-D2', 'S11-441-10', 'S11-405-10']
                         QApplication.processEvents()
                         # TODO 需要将MC改为订单信息
-                        self.comboBox_4.setItemText(int(0), materialCode)
 
                         if fileDataList['CS'][n] in configContent:
                             # self.comboBox_2.setCurrentIndex(username.index(fileDataList['CS'][n])+1)
