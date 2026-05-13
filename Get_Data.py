@@ -107,6 +107,32 @@ class Get_Data():
         self.fileData = self._convert_datetime_to_str(self.fileData)
         return self.fileData
 
+    def getExcelSheetsData(self, fileDataUrl, sheet_name=None):
+        """
+        读取 Excel 文件中的多个 sheet，并分别保存为 DataFrame。
+
+        参数:
+            fileDataUrl (str): Excel 文件路径。
+            sheet_name (str | list | None, optional): 指定要读取的 sheet 名称；None 表示读取全部 sheet。
+
+        返回:
+            dict: {sheet名称: DataFrame}
+        """
+        source_path = Path(fileDataUrl)
+        fileType = source_path.suffix.lower()
+        if fileType not in SUPPORTED_EXCEL_EXTENSIONS:
+            raise ValueError(f"Unsupported file type: {fileType}. Supported types: .xlsx, .xls, .xlsm")
+
+        sheets = pd.read_excel(source_path, sheet_name=sheet_name)
+        if isinstance(sheets, pd.DataFrame):
+            resolved_sheet_name = sheet_name if isinstance(sheet_name, str) else source_path.stem
+            sheets = {resolved_sheet_name: sheets}
+
+        for current_sheet_name, dataframe in sheets.items():
+            sheets[current_sheet_name] = self._convert_datetime_to_str(dataframe)
+
+        return sheets
+
     def getMergeFileData(self, fileDataUrl):
         self.fileDataUrl = fileDataUrl
         fileType = Path(self.fileDataUrl).suffix.lower()
