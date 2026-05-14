@@ -12,9 +12,10 @@ class SapConfig:
     sales_organization: str
     distribution_channels: str
     sales_office: str
+    sales_group: str
 
     # 成本中心相关固定参数。
-    cost_center: str
+
     sub_cost_center_cs: str
     sub_cost_center_chm: str
     sub_cost_center_phy: str
@@ -60,29 +61,28 @@ class OrderData:
     sap_no: str
     # 客户项目号。
     project_no: str
-    # 物料代码。
-    material_code: str
     # 币种。
     currency_type: str
     # 汇率，仅非 CNY 场景使用。
     exchange_rate: float
-    # 外包成本。
-    cost: float
     # 订单头短文本。
     short_text: str
-    # 含税金额，当前保留给上层业务使用。
-    amount_vat: float = 0.0
-    # Item 长文本。
-    long_text: str = ""
     # 全球合作伙伴代码。
     global_partner_code: str = ""
     # 销售名称，当前主要用来判断是否需要补销售伙伴。
     sales_name: str = ""
     # 预计完成日期。
     ecd: str = ""
+    # order_center
+    order_cost_center: str = ""
+    # Sales Group
+    sales_group: str = ""
 
+    # 将item集成在这里
     items: list[OrderItemData] = field(default_factory=list)
 
+    # 含税金额，当前保留给上层业务使用。
+    amount_vat: float = 0.0
 
 @dataclass(slots=True)
 class RevenueData:

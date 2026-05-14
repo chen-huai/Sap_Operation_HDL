@@ -25,289 +25,409 @@ from theme_manager_theme import ThemeManager
 from Revenue_Operate import *
 from auto_updater.config_constants import CURRENT_VERSION
 from auto_updater import AutoUpdater, UI_AVAILABLE
-from sap import CostOptions, OrderData, OrderItemData, OrderService, PartnerOptions, RevenueData, SapConfig, SapSession
+from sap import OrderData, OrderItemData, OrderService, PartnerOptions, RevenueData, SapConfig, SapSession
 from runtime_globals import configContent
 
 class SapOrderMixin:
-    def getRevenueData(self, guiData):
-        # 计算金额
-        # revenue,planCost,revenueForCny,chmCost,phyCost,chmRe,phyRe,chmCsCostAccounting,chmLabCostAccounting,phyCsCostAccounting
-        revenueData = {}
-        revenueData['revenue'] = guiData['amountVat'] / 1.06
-        # plan cost
-        # planCost = revenueData['revenue'] * guiData['exchangeRate'] * 0.9 - guiData['cost']
-        revenueData['planCost'] = revenueData['revenue'] * guiData['exchangeRate']
-        revenueData['revenueForCny'] = revenueData['revenue'] * guiData['exchangeRate']
+    @staticmethod
+    def _excel_value(value, default=''):
+        """读取 Excel 单元格原始值；空值统一转换为默认值。"""
+        if pd.isna(value):
+            return default
+        return value
 
-        # 405-A2的计算公式
-        if ('405' in guiData['materialCode']) and (
-                ("A2" in guiData['materialCode']) or ("D2" in guiData['materialCode']) or (
-                "D3" in guiData['materialCode'])):
-            # DataB-CHM成本
-            revenueData['chmCost'] = format(
-                (revenueData['revenueForCny'] - guiData['cost']) * guiData['chmCostRate'] * 0.5, '.2f')
-            # DataB-PHY成本
-            revenueData['phyCost'] = format(
-                (revenueData['revenueForCny'] - guiData['cost']) * guiData['phyCostRate'] * 0.5, '.2f')
-            # Item1000 的revenue
-            revenueData['chmRe'] = format(revenueData['revenue'] * 0.5, '.2f')
-            # Item2000 的revenue
-            revenueData['phyRe'] = format(revenueData['revenue'] * 0.5, '.2f')
-            # plan cost总算法
-            # revenueData['chmCsCostAccounting'] = format(revenueData['planCost'] * 0.5 * (1 - 0.3  - (1 - guiData['planCostRate'] )) / guiData['csHourlyRate'], '.%sf' % guiData['significantDigits'])
-            # revenueData['chmLabCostAccounting'] = format(revenueData['planCost'] * 0.5 * 0.3 / guiData['chmHourlyRate'], '.%sf' % guiData['significantDigits'])
-            # revenueData['phyCsCostAccounting'] = format(revenueData['planCost'] * 0.5 * (1 - 0.3  - (1 - guiData['planCostRate'] )) / guiData['csHourlyRate'], '.%sf' % guiData['significantDigits'])
-            # revenueData['phyLabCostAccounting'] = format(revenueData['planCost'] * 0.5 * 0.3 / guiData['chmHourlyRate'], '.%sf' % guiData['significantDigits'])
+    @staticmethod
+    def _excel_str(value, default=''):
+        """读取 Excel 单元格文本值；数字编号会去掉无意义的小数位。"""
+        if pd.isna(value):
+            return default
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value).strip()
 
-            # plan cost，理论上（revenue-total cost）*0.9*0.5，实际上SFL省略了0.9的计算（金额不大）
-
-            # CS的Item1000-Cost
-            revenueData['chmCsCostAccounting'] = format(
-                (revenueData['revenueForCny'] - guiData['cost']) * guiData['planCostRate'] * 0.5 * (
-                        1 - guiData['chmCostRate']) / guiData['csHourlyRate'],
-                '.%sf' % guiData['significantDigits'])
-            # CHM的Item1000-Cost
-            revenueData['chmLabCostAccounting'] = format(
-                (revenueData['revenueForCny'] - guiData['cost']) * guiData['planCostRate'] * 0.5 * guiData[
-                    'chmCostRate'] /
-                guiData['chmHourlyRate'], '.%sf' % guiData['significantDigits'])
-            # CS的Item2000-Cost
-            revenueData['phyCsCostAccounting'] = format(
-                (revenueData['revenueForCny'] - guiData['cost']) * guiData['planCostRate'] * 0.5 * (
-                        1 - guiData['phyCostRate']) / guiData['csHourlyRate'],
-                '.%sf' % guiData['significantDigits'])
-            # PHY的Item2000-Cost
-            revenueData['phyLabCostAccounting'] = format(
-                (revenueData['revenueForCny'] - guiData['cost']) * guiData['planCostRate'] * 0.5 * guiData[
-                    'phyCostRate'] /
-                guiData['phyHourlyRate'], '.%sf' % guiData['significantDigits'])
-
-        # 441-A2计算公式
-        elif ('441' in guiData['materialCode']) and ((
-                "A2" in guiData['materialCode'] or ("D2" in guiData['materialCode']) or (
-                "D3" in guiData['materialCode']))):
-            # DataB-CHM成本
-            revenueData['chmCost'] = format(
-                (revenueData['revenueForCny'] - guiData['cost']) * guiData['chmCostRate'] * 0.8, '.2f')
-            # DataB-PHY成本
-            revenueData['phyCost'] = format(
-                (revenueData['revenueForCny'] - guiData['cost']) * guiData['phyCostRate'] * 0.2, '.2f')
-            # Item1000 的revenue
-            revenueData['chmRe'] = format(revenueData['revenue'] * 0.8, '.2f')
-            # Item2000 的revenue
-            revenueData['phyRe'] = format(revenueData['revenue'] * 0.2, '.2f')
-            # plan cost总算法
-            # revenueData['chmCsCostAccounting'] = format(revenueData['planCost'] * 0.8 * (1 - 0.3  - (1 - guiData['planCostRate'] )) / guiData['csHourlyRate'], '.%sf' % guiData['significantDigits'])
-            # revenueData['chmLabCostAccounting'] = format(revenueData['planCost'] * 0.8 * 0.3 / guiData['chmHourlyRate'], '.%sf' % guiData['significantDigits'])
-            # revenueData['phyCsCostAccounting'] = format(revenueData['planCost'] * 0.2 * (1 - 0.3  - (1 - guiData['planCostRate'] )) / guiData['csHourlyRate'], '.%sf' % guiData['significantDigits'])
-            # revenueData['phyLabCostAccounting'] = format(revenueData['planCost'] * 0.2 * 0.3 / guiData['chmHourlyRate'], '.%sf' % guiData['significantDigits'])
-
-            # CS的Item1000-Cost
-            revenueData['chmCsCostAccounting'] = format(
-                (revenueData['revenueForCny'] - guiData['cost']) * guiData['planCostRate'] * 0.8 * (
-                        1 - guiData['chmCostRate']) / guiData['csHourlyRate'],
-                '.%sf' % guiData['significantDigits'])
-            # CHM的Item1000-Cost
-            revenueData['chmLabCostAccounting'] = format(
-                (revenueData['revenueForCny'] - guiData['cost']) * guiData['planCostRate'] * 0.8 * guiData[
-                    'chmCostRate'] /
-                guiData['chmHourlyRate'], '.%sf' % guiData['significantDigits'])
-            # CS的Item2000-Cost
-            revenueData['phyCsCostAccounting'] = format(
-                (revenueData['revenueForCny'] - guiData['cost']) * guiData['planCostRate'] * 0.2 * (
-                        1 - guiData['phyCostRate']) / guiData['csHourlyRate'],
-                '.%sf' % guiData['significantDigits'])
-            # PHY的Item2000-Cost
-            revenueData['phyLabCostAccounting'] = format(
-                (revenueData['revenueForCny'] - guiData['cost']) * guiData['planCostRate'] * 0.2 * guiData[
-                    'phyCostRate'] /
-                guiData['phyHourlyRate'], '.%sf' % guiData['significantDigits'])
-
-        # 430-A2计算公式
-        elif ('430' in guiData['materialCode']) and (
-                "A2" in guiData['materialCode']):
-            # DataB-CHM成本
-            revenueData['chmCost'] = format(
-                (revenueData['revenueForCny'] - guiData['cost']) * guiData['chmCostRate'] * 0.2, '.2f')
-            # DataB-PHY成本
-            revenueData['phyCost'] = format(
-                (revenueData['revenueForCny'] - guiData['cost']) * guiData['phyCostRate'] * 0.8, '.2f')
-            # Item1000 的revenue
-            revenueData['chmRe'] = format(revenueData['revenue'] * 0.2, '.2f')
-            # Item2000 的revenue
-            revenueData['phyRe'] = format(revenueData['revenue'] * 0.8, '.2f')
-            # plan cost总算法
-            # revenueData['chmCsCostAccounting'] = format(revenueData['planCost'] * 0.8 * (1 - 0.3  - (1 - guiData['planCostRate'] )) / guiData['csHourlyRate'], '.%sf' % guiData['significantDigits'])
-            # revenueData['chmLabCostAccounting'] = format(revenueData['planCost'] * 0.8 * 0.3 / guiData['chmHourlyRate'], '.%sf' % guiData['significantDigits'])
-            # revenueData['phyCsCostAccounting'] = format(revenueData['planCost'] * 0.2 * (1 - 0.3  - (1 - guiData['planCostRate'] )) / guiData['csHourlyRate'], '.%sf' % guiData['significantDigits'])
-            # revenueData['phyLabCostAccounting'] = format(revenueData['planCost'] * 0.2 * 0.3 / guiData['chmHourlyRate'], '.%sf' % guiData['significantDigits'])
-
-            # CS的Item1000-Cost
-            revenueData['chmCsCostAccounting'] = format(
-                (revenueData['revenueForCny'] - guiData['cost']) * guiData['planCostRate'] * 0.2 * (
-                        1 - guiData['chmCostRate']) / guiData['csHourlyRate'],
-                '.%sf' % guiData['significantDigits'])
-            # CHM的Item1000-Cost
-            revenueData['chmLabCostAccounting'] = format(
-                (revenueData['revenueForCny'] - guiData['cost']) * guiData['planCostRate'] * 0.2 * guiData[
-                    'chmCostRate'] /
-                guiData['chmHourlyRate'], '.%sf' % guiData['significantDigits'])
-            # CS的Item2000-Cost
-            revenueData['phyCsCostAccounting'] = format(
-                (revenueData['revenueForCny'] - guiData['cost']) * guiData['planCostRate'] * 0.8 * (
-                        1 - guiData['phyCostRate']) / guiData['csHourlyRate'],
-                '.%sf' % guiData['significantDigits'])
-            # PHY的Item2000-Cost
-            revenueData['phyLabCostAccounting'] = format(
-                (revenueData['revenueForCny']  - guiData['cost']) * guiData['planCostRate'] * 0.8 * guiData[
-                    'phyCostRate'] /
-                guiData['phyHourlyRate'], '.%sf' % guiData['significantDigits'])
-        else:
-            revenueData['chmCost'] = format((revenueData['revenueForCny'] - guiData['cost']) * guiData['chmCostRate'],
-                                            '.2f')
-            revenueData['phyCost'] = format((revenueData['revenueForCny'] - guiData['cost']) * guiData['phyCostRate'],
-                                            '.2f')
-            revenueData['chmRe'] = format(revenueData['revenue'], '.2f')
-            revenueData['phyRe'] = format(revenueData['revenue'], '.2f')
-            # plan cost总算法
-            # csCostAccounting = format(planCost * (1 - 0.3  - (1 - guiData['planCostRate'] )) / guiData['csHourlyRate'], '.%sf' % guiData['significantDigits'])
-            # labCostAccounting = format(planCost * 0.3 / guiData['chmHourlyRate'], '.%sf' % guiData['significantDigits'])
-            if 'T75' in guiData['materialCode']:
-                revenueData['labCostRate'] = guiData['chmCostRate']
-                revenueData['labHourlyRate'] = guiData['chmHourlyRate']
-            else:
-                revenueData['labCostRate'] = guiData['phyCostRate']
-                revenueData['labHourlyRate'] = guiData['phyHourlyRate']
-
-            revenueData['csCostAccounting'] = format(
-                (revenueData['revenueForCny'] - guiData['cost']) * guiData['planCostRate'] * (
-                        1 - revenueData['labCostRate']) / guiData[
-                    'csHourlyRate'], '.%sf' % guiData['significantDigits'])
-            revenueData['labCostAccounting'] = format(
-                (revenueData['revenueForCny'] - guiData['cost']) * guiData['planCostRate'] * revenueData[
-                    'labCostRate'] / revenueData['labHourlyRate'],
-                '.%sf' % guiData['significantDigits'])
-        return revenueData
-    def getRevenueDataUnified(self, guiData, configContent):
-        """
-        统一的收入分配计算方法，使用 Revenue_Operate.py 的逻辑
-        
-        Args:
-            guiData: GUI界面数据
-            configContent: 配置内容（从 Revenue_Operate.py 传入）
-            
-        Returns:
-            与原 getRevenueData 方法相同格式的数据
-        """
+    @staticmethod
+    def _excel_float(value, default=0.0):
+        """读取 Excel 单元格数值；无法转换时返回默认值。"""
+        if pd.isna(value) or value == '':
+            return default
         try:
-            # 导入 Revenue_Operate 模块
-            from Revenue_Operate import RevenueAllocator
-            
-            # 创建分配器实例
-            allocator = RevenueAllocator()
-            # 将未税的cost，更新为含税的cost，与直接获取order的Excel保持一致
-            if self.checkBox_27.isChecked():
-                cost = guiData.get('cost', 0) * 1.06
-            else:
-                cost = guiData.get('cost', 0)
-            # 转换 GUI 数据为 Revenue_Operate 格式
-            revenueDataForAllocation = {
-                'Order Number': guiData.get('orderNo', ''),
-                'Material Code': guiData.get('materialCode', ''),
-                'Total Subcon Cost': cost,
-                'Primary CS': guiData.get('csName', ''),
-                'Tax-inclusive amount': guiData.get('amountVat', ''),
-                'Rate': guiData.get('exchangeRate', ''),
-            }
-            
-            # 调用新的分配方法，获取 result 字典格式的数据
-            result = allocator.allocate_department_hours(revenueDataForAllocation, configContent, return_format='traditional')
-            
-            # 将 result 数据转换为原 getRevenueData 格式
-            return self._convertResultToRevenueData(result, guiData, configContent)
-            
-        except Exception as e:
-            # 如果新方法失败，回退到原方法
-            print(f"统一计算方法失败，使用原方法: {e}")
-            return self.getRevenueData(guiData)
-    def _convertResultToRevenueData(self, result, guiData, configContent):
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _filter_related_rows(self, dataframe, order_row):
+        """按 Combine Id 严格筛选当前订单对应的明细行；调用前需确保 Combine Id 存在。"""
+        if dataframe.empty:
+            return dataframe
+        combine_id = self._excel_value(order_row.get('Combine Id'))
+        return dataframe[dataframe['Combine Id'] == combine_id]
+
+    def _build_sap_config_from_order_row(self, order_row):
+        """按当前订单行和系统配置构建 SAP 固定参数。"""
+        cs_name = self._excel_str(order_row.get('Primary CS'))
+        sales_name = self._excel_str(order_row.get('Sales'))
+        return SapConfig(
+            # 登录界面
+            order_type=self.lineEdit_10.text(),
+            sales_organization=self.lineEdit_11.text(),
+            distribution_channels=self.lineEdit_12.text(),
+            sales_office=self.lineEdit_13.text(),
+            sales_group=self.lineEdit_14.text(),
+            # TODO 业务和成本中心，可能可以删除
+            sub_cost_center_cs=self.lineEdit_18.text(),
+            sub_cost_center_chm=self.lineEdit_19.text(),
+            sub_cost_center_phy=self.lineEdit_20.text(),
+            # cs和sales
+            cs_code=configContent.get(cs_name, ''),
+            sales_code=configContent.get(sales_name, ''),
+            # 客户选择是否为海外订单
+            data_ae1=self.lineEdit_21.text().split(';'),
+            data_az2=self.lineEdit_22.text().split(';'),
+        )
+
+    def _build_order_from_dataframes(self, order_row, item_df):
+        """从订单头和 item 表构建 SAP 订单对象。"""
+        order_items_df = self._filter_related_rows(item_df, order_row)
+        items = []
+        for _, item_row in order_items_df.iterrows():
+            # item 表已经包含 SAP item 所需的物料和金额，不再从 GUI 或规则计算。
+            items.append(OrderItemData(
+                item=self._excel_str(item_row.get('item')),
+                material_code=self._excel_str(item_row.get('Item Material Code')),
+                revenue=self._excel_float(item_row.get('Item price')),
+                quantity='1',
+                unit='pu',
+            ))
+
+        return OrderData(
+            sap_no=self._excel_str(order_row.get('SAP Customer Code')),
+            project_no=self._excel_str(order_row.get('Request Number')),
+            amount_vat=self._excel_str(order_row.get('Tax-inclusive amount')),
+            currency_type=self._excel_str(order_row.get('Currency')),
+            exchange_rate=self._excel_float(order_row.get('Rate'), 1.0),
+            short_text=self._excel_str(order_row.get('Request Number')),
+            global_partner_code=self._excel_str(order_row.get('GPC Code')),
+            sales_name=self._excel_str(order_row.get('Sales')),
+            sales_group=self._excel_str(order_row.get('Cost Center'))[-3:],
+            # TODO ECD需要更新 ecd=self._excel_str(order_row.get('ECD')),
+            ecd=time.strftime("%Y.%m.%d"),
+            order_cost_center=self._excel_str(order_row.get('Order Center')),
+
+            items=items,
+        )
+
+    def _build_revenue_from_order_row(self, order_row):
+        """从订单表读取 Revenue；只做对象适配，不再重新分配或计算业务金额。"""
+        revenue = self._excel_float(order_row.get('Revenue'), self._excel_float(order_row.get('Untaxed amount')))
+        rate = self._excel_float(order_row.get('Rate'), 1.0)
+        return RevenueData(
+            revenue=revenue,
+            revenue_cny=revenue * rate,
+        )
+
+    def _build_sub_entries_from_dataframe(self, order_row, sub_df):
+        """从 sub 表构建 Data B 和 Plan Cost 的直接写入明细。"""
+        order_sub_df = self._filter_related_rows(sub_df, order_row)
+        data_b_entries = []
+        plan_cost_entries_by_item = {}
+        order_cost_center = self._excel_str(order_row.get('Cost Center'))
+
+        for _, sub_row in order_sub_df.iterrows():
+            item_no = self._excel_str(sub_row.get('item'))
+            sub_cost_center = self._excel_str(sub_row.get('Sub Site Cost Center'))
+            sub_cost = self._excel_float(sub_row.get('Sub-Cost RMB'))
+            plan_hour = self._excel_float(sub_row.get('Sub Site Plan Hour'))
+
+            if sub_cost_center and sub_cost:
+                # Data B 只写 Sub Site Cost Center 和 Sub-Cost RMB 都有值的行。
+                data_b_entries.append({
+                    'performer_cost_center': sub_cost_center,
+                    'rate_cost_center': sub_cost_center,
+                    'amount': sub_cost,
+                })
+
+                # Plan Cost 中 FREMDL 按对应 item 汇总 Sub-Cost RMB。
+                plan_cost_entries_by_item.setdefault(item_no, []).append({
+                    'cost_center': sub_cost_center,
+                    'category': 'FREMDL',
+                    'amount': sub_cost,
+                })
+
+            if order_cost_center and plan_hour:
+                # Plan Cost 中 T01AST 使用订单信息 Cost Center + Sub Site Plan Hour。
+                plan_cost_entries_by_item.setdefault(item_no, []).append({
+                    'cost_center': order_cost_center,
+                    'category': 'T01AST',
+                    'amount': plan_hour,
+                })
+
+        summarized_plan_cost_entries = {}
+        for item_no, entries in plan_cost_entries_by_item.items():
+            summary = {}
+            for entry in entries:
+                key = (entry['cost_center'], entry['category'])
+                summary[key] = summary.get(key, 0) + entry['amount']
+            summarized_plan_cost_entries[item_no] = [
+                {
+                    'cost_center': cost_center,
+                    'category': category,
+                    'amount': amount,
+                }
+                for (cost_center, category), amount in summary.items()
+                if amount
+            ]
+
+        return data_b_entries, summarized_plan_cost_entries
+
+    @staticmethod
+    def _find_item_row(order, item_no):
+        """根据 item 编号找到 SAP item 表格中的行号。"""
+        for row, item in enumerate(order.items):
+            if item.item == item_no:
+                return row
+        return 0
+
+    @staticmethod
+    def _extract_order_no(session):
+        """优先读取 VBELN，其次从状态栏中提取已保存的订单号。"""
+        try:
+            order_no = str(session.read_text("wnd[0]/usr/ctxtVBAK-VBELN")).strip()
+            if order_no:
+                return order_no
+        except Exception:
+            pass
+        try:
+            status_text = session.read_status()
+        except Exception:
+            return ''
+        match = re.search(r"(\d{6,})", status_text)
+        return match.group(1) if match else ''
+
+    def odmDataToSap(self):
         """
-        将 allocate_department_hours 的 result 字典直接映射为 getRevenueData 格式
-        直接引用已计算好的数据，不重新计算
+        从 SAP_data 多 sheet 文件批量创建 SAP Order。
+
+        业务数据来源：
+            订单信息：创建订单头、伙伴、币种、Revenue 等订单级数据。
+            item：创建 SAP item 行和 item 金额。
+            sub：创建 Data B 和 Plan Cost 明细。
         """
-        revenueData = {}
-        
-        # 基础计算 - 与原 getRevenueData 保持一致
-        revenueData['revenue'] = guiData['amountVat'] / 1.06
-        revenueData['planCost'] = revenueData['revenue'] * guiData['exchangeRate']
-        revenueData['revenueForCny'] = revenueData['revenue'] * guiData['exchangeRate']
-        
-        # 获取有效位数
-        significant_digits = int(configContent.get('Significant_Digits', 2))
-        
-        # 直接引用 result 中的计算结果
-        # 根据实验室分配情况映射数据
+        fileUrl = self.lineEdit_6.text()
+        if not fileUrl:
+            QMessageBox.information(self, "提示信息", "请选择订单数据文件", QMessageBox.Yes)
+            return
 
-        # 情况1: 配置不存在
-        if guiData['materialCode'] not in configContent:
-            revenueData['csCostAccounting'] = format(result.get('business_dept_1000_hours', 0),
-                                                        f'.{significant_digits}f')
-            revenueData['labCostAccounting'] = format(result.get('lab_1000_hours', 0), f'.{significant_digits}f')
-            if 'T75' in guiData['materialCode']:
-                revenueData['labCostRate'] = guiData['chmCostRate']
-                revenueData['labHourlyRate'] = guiData['chmHourlyRate']
-                revenueData['chmCost'] = format(result.get('lab_1000_act_revenue', 0), '.2f')
-                revenueData['chmRe'] = revenueData['phyRe'] =  format(result.get('item_1000_amount', 0), '.2f')
-                revenueData['phyCost'] = format((revenueData['revenueForCny'] - guiData['cost']) * guiData['phyCostRate'] , '.2f')
+        sap_session = None
+        try:
+            # 订单业务字段来自 Excel；事务流开关仍使用 GUI 复选框控制。
+            flow_options = self.__class__.getGuiData(self)
+            sheets = Get_Data().getExcelSheetsData(fileUrl)
+            order_df = sheets['订单信息']
+            item_df = sheets['item']
+            sub_df = sheets.get('sub', pd.DataFrame())
 
-            else:
-                revenueData['labCostRate'] = guiData['phyCostRate']
-                revenueData['labHourlyRate'] = guiData['phyHourlyRate']
-                revenueData['chmCost'] = format((revenueData['revenueForCny'] - guiData['cost']) * guiData['chmCostRate'] , '.2f')
-                revenueData['phyRe'] = revenueData['chmRe'] = format(result.get('item_1000_amount', 0), '.2f')
-                revenueData['phyCost'] = format(result.get('lab_1000_act_revenue', 0), '.2f')
-        else:
-            # CHM 相关数据
-            if result.get('lab_1000') == 'CHM':
-                # CHM 在 Item1000 中
-                revenueData['chmCost'] = format(result.get('lab_1000_act_revenue', 0), '.2f')
-                revenueData['chmRe'] = format(result.get('item_1000_amount', 0), '.2f')
-                revenueData['chmCsCostAccounting'] = format(result.get('business_dept_1000_hours', 0), f'.{significant_digits}f')
-                revenueData['chmLabCostAccounting'] = format(result.get('lab_1000_hours', 0), f'.{significant_digits}f')
-            elif result.get('lab_2000') == 'CHM':
-                # CHM 在 Item2000 中
-                revenueData['chmCost'] = format(result.get('lab_2000_act_revenue', 0) , '.2f')
-                revenueData['chmRe'] = format(result.get('item_2000_amount', 0), '.2f')
-                revenueData['chmCsCostAccounting'] = format(result.get('business_dept_2000_hours', 0), f'.{significant_digits}f')
-                revenueData['chmLabCostAccounting'] = format(result.get('lab_2000_hours', 0), f'.{significant_digits}f')
-            else:
-                # CHM 没有分配
-                revenueData['chmCost'] = '0.00'
-                revenueData['chmRe'] = '0.00'
-                revenueData['chmCsCostAccounting'] = '0'
-                revenueData['chmLabCostAccounting'] = '0'
+            # 订单和 item 表 Combine Id 必须完整；sub 表 Combine Id 不要求对应。
+            missing_order_rows = order_df.index[order_df['Combine Id'].isna()].tolist()
+            missing_item_rows = item_df.index[item_df['Combine Id'].isna()].tolist()
+            if missing_order_rows:
+                self.textBrowser.append(
+                    "<font color='red'>订单信息表 Combine Id 为空的行号: %s</font>" % missing_order_rows
+                )
+            if missing_item_rows:
+                self.textBrowser.append(
+                    "<font color='red'>item 表 Combine Id 为空的行号: %s</font>" % missing_item_rows
+                )
+            if missing_order_rows or missing_item_rows:
+                QApplication.processEvents()
 
-            # PHY 相关数据
-            if result.get('lab_1000') == 'PHY':
-                # PHY 在 Item1000 中
-                revenueData['phyCost'] = format(result.get('lab_1000_act_revenue', 0), '.2f')
-                revenueData['phyRe'] = format(result.get('item_1000_amount', 0), '.2f')
-                revenueData['phyCsCostAccounting'] = format(result.get('business_dept_1000_hours', 0), f'.{significant_digits}f')
-                revenueData['phyLabCostAccounting'] = format(result.get('lab_1000_hours', 0), f'.{significant_digits}f')
-            elif result.get('lab_2000') == 'PHY':
-                # PHY 在 Item2000 中
-                revenueData['phyCost'] = format(result.get('lab_2000_act_revenue', 0), '.2f')
-                revenueData['phyRe'] = format(result.get('item_2000_amount', 0), '.2f')
-                revenueData['phyCsCostAccounting'] = format(result.get('business_dept_2000_hours', 0), f'.{significant_digits}f')
-                revenueData['phyLabCostAccounting'] = format(result.get('lab_2000_hours', 0), f'.{significant_digits}f')
-            else:
-                # PHY 没有分配
-                revenueData['phyCost'] = '0.00'
-                revenueData['phyRe'] = '0.00'
-                revenueData['phyCsCostAccounting'] = '0'
-                revenueData['phyLabCostAccounting'] = '0'
-        
-        return revenueData
+            # 每次批量处理生成一份 log，保留原订单表字段并追加 SAP 执行结果。
+            filepath, _ = os.path.split(fileUrl)
+            log_file_url = os.path.join(filepath, 'log')
+            self.__class__.createFolder(self, log_file_url)
+            log_data_path = self.__class__.getFileName(self, log_file_url, 'log', 'xlsx')
+            log_file = order_df.copy()
+            log_file['Order No.'] = ''
+            log_file['Remark'] = ''
+            log_file['Proforma No.'] = ''
+            log_file['sapAmountVat'] = ''
+            log_file['Update Time'] = '未开Order'
+
+            sap_session = SapSession.connect()
+
+            for index, order_row in order_df.iterrows():
+                # Combine Id 是关联 item / sub 的唯一键，缺失直接跳过当前订单。
+                if pd.isna(order_row.get('Combine Id')):
+                    log_file.loc[index, 'Remark'] = '缺失 Combine Id，无法关联 item/sub'
+                    log_file.to_excel(log_data_path, merge_cells=False, index=False)
+                    continue
+
+                # 三张 DataFrame 已包含完整业务数据，这里只做对象适配和 SAP 写入。
+                order = self._build_order_from_dataframes(order_row, item_df)
+                revenue = self._build_revenue_from_order_row(order_row)
+                config = self._build_sap_config_from_order_row(order_row)
+                data_b_entries, plan_cost_entries_by_item = self._build_sub_entries_from_dataframe(order_row, sub_df)
+                service = OrderService(sap_session, config)
+
+                if not order.sap_no or not order.project_no or not order.items:
+                    log_file.loc[index, 'Remark'] = '关键订单信息缺失'
+                    log_file.to_excel(log_data_path, merge_cells=False, index=False)
+                    self.textBrowser.append(
+                        "<font color='red'>No.%s 关键订单信息缺失（SAP No./Project No./items 任一为空）</font>"
+                        % (index + 1)
+                    )
+                    QApplication.processEvents()
+                    continue
+
+                # textBrowser 抬头：基础信息 + Excel 含税金额。
+                combine_id = self._excel_str(order_row.get('Combine Id'))
+                primary_cs = self._excel_str(order_row.get('Primary CS'))
+                sales_name = self._excel_str(order_row.get('Sales'))
+                excel_amount_vat = self._excel_str(order_row.get('Tax-inclusive amount'))
+                items_revenue_total = sum(item.revenue for item in order.items)
+
+                self.textBrowser.append('==================== No.%s ====================' % (index + 1))
+                self.textBrowser.append("Combine Id: %s" % combine_id)
+                self.textBrowser.append("Request Number: %s" % order.project_no)
+                self.textBrowser.append("Primary CS: %s" % primary_cs)
+                self.textBrowser.append("Sales: %s" % sales_name)
+                self.textBrowser.append("含税金额(Excel): %s" % excel_amount_vat)
+                self.textBrowser.append("Items 加和金额: %s" % format(items_revenue_total, ',.2f'))
+                QApplication.processEvents()
+
+                remarks = []
+                # 业务流程：VA01(可选) → Save VA01 → 打开 VA02(可选) → Add Item → Data B(可选) → Plan Cost(可选) → Save VA02
+                # 所有步骤独立可选；跳过 VA01 时 order_no 取自 Excel 的 Order Number 列。
+                order_no = self._excel_str(order_row.get('Order Number'))
+                sap_amount_vat = ''
+
+                def _report_step(step_name, step_result):
+                    """步骤结果落到 textBrowser；失败时红字附带错误原因。"""
+                    if step_result.success:
+                        suffix = ': %s' % step_result.message if step_result.message else ''
+                        self.textBrowser.append('%s 成功%s' % (step_name, suffix))
+                    else:
+                        message = step_result.message or '未知错误'
+                        self.textBrowser.append(
+                            "<font color='red'>%s 失败: %s</font>" % (step_name, message)
+                        )
+                    QApplication.processEvents()
+
+                # Step 1: VA01 创建订单头
+                va01_done = False
+                if flow_options.get('va01Check'):
+                    create_result = service.create_order(order, revenue)
+                    remarks.append(f"VA01:{create_result.message}" if create_result.message else "VA01")
+                    order_no = create_result.order_no or order_no
+                    sap_amount_vat = create_result.sap_amount_vat or sap_amount_vat
+                    va01_done = create_result.success
+                    _report_step('VA01', create_result)
+
+                # Step 2: Save VA01 —— VA01 成功后，若有后续步骤或显式 saveCheck 都需要落盘
+                need_save_va01 = va01_done and (
+                    flow_options.get('saveCheck')
+                    or flow_options.get('va02Check')
+                )
+                if need_save_va01:
+                    save_va01_result = service.save('VA01')
+                    remarks.append(
+                        f"Save VA01:{save_va01_result.message}" if save_va01_result.message else "Save VA01"
+                    )
+                    if save_va01_result.success:
+                        saved_order_no = self._extract_order_no(sap_session)
+                        if saved_order_no:
+                            order_no = saved_order_no
+                    _report_step('Save VA01', save_va01_result)
+
+                # Step 3-6: VA02 段。只要勾选了 va02Check / labCostCheck / planCostCheck 任意一项，就需要进入 VA02。
+                need_va02 = (flow_options.get('va02Check'))
+
+                if need_va02:
+                    open_result = service.open_order(order_no)
+                    remarks.append(f"VA02:{open_result.message}" if open_result.message else "VA02")
+                    _report_step('Open VA02', open_result)
+
+                    if open_result.success:
+                        # add item 仅在 va02Check 时进行；纯 Data B / Plan Cost 场景不重复加 item。
+                        if flow_options.get('va02Check'):
+                            item_result = service.add_items(order, revenue)
+                            remarks.append(f"Item:{item_result.message}" if item_result.message else "Item")
+                            sap_amount_vat = item_result.sap_amount_vat or sap_amount_vat
+                            _report_step('Add Item', item_result)
+
+                        if flow_options.get('labCostCheck') and data_b_entries:
+                            data_b_result = service.fill_lab_cost_entries(data_b_entries)
+                            remarks.append(
+                                f"Data B:{data_b_result.message}" if data_b_result.message else "Data B"
+                            )
+                            _report_step('Data B', data_b_result)
+
+                        if flow_options.get('planCostCheck'):
+                            for item_no, plan_cost_entries in plan_cost_entries_by_item.items():
+                                focus_row = self._find_item_row(order, item_no)
+                                plan_result = service.apply_plan_cost_entries(
+                                    plan_cost_entries, focus_row=focus_row
+                                )
+                                remarks.append(
+                                    f"Plan Cost {item_no}:{plan_result.message}"
+                                    if plan_result.message
+                                    else f"Plan Cost {item_no}"
+                                )
+                                _report_step('Plan Cost %s' % item_no, plan_result)
+
+                        if flow_options.get('saveCheck'):
+                            save_va02_result = service.save('VA02')
+                            remarks.append(
+                                f"Save VA02:{save_va02_result.message}"
+                                if save_va02_result.message
+                                else "Save VA02"
+                            )
+                            _report_step('Save VA02', save_va02_result)
+
+                log_file.loc[index, 'Order No.'] = order_no
+                log_file.loc[index, 'Remark'] = ';'.join([item for item in remarks if item])
+                log_file.loc[index, 'Proforma No.'] = ''
+                log_file.loc[index, 'sapAmountVat'] = sap_amount_vat
+                log_file.loc[index, 'Update Time'] = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+                log_file.to_excel(log_data_path, merge_cells=False, index=False)
+
+                # 订单结束摘要：order no、SAP 加和金额、按 6% 税率换算的含税金额。
+                try:
+                    sap_amount_value = float(str(sap_amount_vat).replace(',', '')) if sap_amount_vat else 0.0
+                except (TypeError, ValueError):
+                    sap_amount_value = 0.0
+                calc_amount_with_vat = sap_amount_value * 1.06
+                self.textBrowser.append("Order No.: %s" % order_no)
+                self.textBrowser.append("SAP 金额(加和): %s" % (sap_amount_vat or '--'))
+                self.textBrowser.append(
+                    "计算含税金额(按 6%% 税率): %s" % format(calc_amount_with_vat, ',.2f')
+                )
+                self.textBrowser.append('----------------------------------')
+                QApplication.processEvents()
+
+                if index < len(order_df) - 1 and self.checkBox_5.isChecked():
+                    reply = QMessageBox.question(
+                        self,
+                        '信息',
+                        '是否继续填写下一个Order',
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.Yes,
+                    )
+                    if reply != QMessageBox.Yes:
+                        break
+
+            self.lineEdit_9.setText(log_data_path)
+            self.textBrowser.append("订单数据已处理完成")
+            self.textBrowser.append("log数据:%s" % log_data_path)
+            self.textBrowser.append('----------------------------------')
+            QMessageBox.information(self, "提示信息", "订单数据已处理完成", QMessageBox.Yes)
+        except Exception as msg:
+            self.textBrowser.append('订单数据处理失败:%s' % msg)
+            self.textBrowser.append('----------------------------------')
+            QMessageBox.information(self, "提示信息", '订单数据处理失败:%s' % msg, QMessageBox.Yes)
+        finally:
+            if sap_session is not None:
+                sap_session.close()
+
     def sap_operate(self, guiData=None, revenueData=None, sap_obj=None, include_followup=True):
         direct_gui_call = not isinstance(guiData, dict) and not isinstance(revenueData, dict) and sap_obj is None
         # 主按钮使用的统一 SAP 订单流程。
@@ -411,22 +531,8 @@ class SapOrderMixin:
             data.update(extra)
             return data
 
-        def _extract_order_no(session):
-            # 优先读取订单号字段；保存后再从状态栏兜底提取订单号。
-            try:
-                order_no = str(session.read_text("wnd[0]/usr/ctxtVBAK-VBELN")).strip()
-                if order_no:
-                    return order_no
-            except Exception:
-                pass
-
-            try:
-                status_text = session.read_status()
-            except Exception:
-                return ''
-
-            match = re.search(r"(\d{6,})", status_text)
-            return match.group(1) if match else ''
+        # 使用类级别的 _extract_order_no 共享实现。
+        _extract_order_no = SapOrderMixin._extract_order_no
 
         if not isinstance(guiData, dict):
             # PyQt clicked 信号可能会把 checked 布尔值传入槽函数。
@@ -454,8 +560,7 @@ class SapOrderMixin:
                 sales_organization=str(guiData.get('salesOrganization', '')).strip(),
                 distribution_channels=str(guiData.get('distributionChannels', '')).strip(),
                 sales_office=str(guiData.get('salesOffice', '')).strip(),
-                # 240
-                cost_center=str(guiData.get('salesGroup', '')).strip(),
+                sales_group=str(guiData.get('salesGroup', '')).strip(),
                 sub_cost_center_cs=str(guiData.get('csCostCenter', '')).strip(),
                 sub_cost_center_chm=str(guiData.get('chmCostCenter', '')).strip(),
                 sub_cost_center_phy=str(guiData.get('phyCostCenter', '')).strip(),
@@ -468,16 +573,13 @@ class SapOrderMixin:
             order = OrderData(
                 sap_no=str(guiData.get('sapNo', '')).strip(),
                 project_no=str(guiData.get('projectNo', '')).strip(),
-                material_code=str(guiData.get('materialCode', '')).strip(),
                 currency_type=str(guiData.get('currencyType', '')).strip(),
                 exchange_rate=_to_float(guiData.get('exchangeRate'), 1.0),
-                cost=_to_float(guiData.get('cost')),
                 short_text=str(guiData.get('shortText', '')).strip(),
-                amount_vat=_to_float(guiData.get('amountVat')),
-                long_text=str(guiData.get('longText', '')).strip(),
                 global_partner_code=str(guiData.get('globalPartnerCode', '')).strip(),
                 sales_name=str(guiData.get('salesName', '')).strip(),
                 ecd=time.strftime("%Y.%m.%d"),
+                order_center=str(guiData.get('orderCenter', '')).strip(),
                 items=_build_order_items(guiData),
             )
 
@@ -525,15 +627,6 @@ class SapOrderMixin:
                 if not result.success or not include_followup:
                     return _finish(final_res)
 
-                if guiData.get('labCostCheck'):
-                    # 步骤 2：Data B 在订单抬头写入 lab cost 行。
-                    data_b_result = service.fill_lab_cost(order, revenue)
-                    _add_step('Data B', data_b_result.success, data_b_result.message, final_res['orderNo'])
-                    if not data_b_result.success:
-                        return _finish(_legacy_result(data_b_result, orderNo=final_res['orderNo']))
-                    if data_b_result.message:
-                        final_res['msg'] = data_b_result.message
-
                 if guiData.get('va02Check') or guiData.get('saveCheck'):
                     # VA02 需要已保存的订单号，所以先保存 VA01。
                     save_result = service.save('VA01')
@@ -577,27 +670,6 @@ class SapOrderMixin:
                 if not item_result.success:
                     return _finish(final_res)
 
-                if guiData.get('planCostCheck'):
-                    # 步骤 4：Plan Cost 为可选操作，并按 CS/CHM/PHY 勾选项执行。
-                    cost_result = service.apply_plan_cost(
-                        order,
-                        revenue,
-                        cost_options=CostOptions(
-                            include_cs=bool(guiData.get('csCheck', True)),
-                            include_chm=bool(guiData.get('chmCheck', True)),
-                            include_phy=bool(guiData.get('phyCheck', True)),
-                        ),
-                    )
-                    _add_step('Plan Cost', cost_result.success, cost_result.message, final_res['orderNo'], final_res.get('sapAmountVat', ''))
-                    if not cost_result.success:
-                        return _finish(_legacy_result(
-                            cost_result,
-                            orderNo=final_res['orderNo'],
-                            sapAmountVat=final_res.get('sapAmountVat', ''),
-                        ))
-                    if cost_result.message:
-                        final_res['msg'] = cost_result.message
-
                 if guiData.get('vf01Check') or guiData.get('saveCheck'):
                     # 创建发票或结束流程前，先保存 VA02。
                     save_result = service.save('VA02')
@@ -625,186 +697,13 @@ class SapOrderMixin:
             if own_session and sap_session is not None:
                 sap_session.close()
     def sapOperate(self, sap_obj):
-        logMsg = {}
-        logMsg['Remark'] = ''
-        logMsg['orderNo'] = ''
-        logMsg['Proforma No.'] = ''
-        logMsg['sapAmountVat'] = ''
-        try:
-            flag = 1
-            # 获取数据
-            guiData = self.__class__.getGuiData(self)
-            orderNo = ''
-            proformaNo = ''
-            if guiData['everyCheck'] or not hasattr(sap_obj, 'va01_operate'):
-                sap_obj = Sap()
-            if guiData['sapNo'] == '' or guiData['projectNo'] == '' or guiData['materialCode'] == '' or guiData[
-                'currencyType'] == '' or guiData['exchangeRate'] == '' or guiData['globalPartnerCode'] == '' or guiData[
-                'csName'] == '' or guiData['amount'] == 0.00 or guiData['amountVat'] == 0.00:
-                self.textBrowser.append("<font color='red'>有关键信息未填</font>")
-                logMsg['Remark'] = '有关键信息未填'
-                self.textBrowser.append(
-                    "'Project No.', 'CS', 'Sales', 'Currency', 'GPC Glo. Par. Code', 'Material Code','SAP No.', 'Amount', 'Amount with VAT', 'Exchange Rate'都是必须填写的")
-                self.textBrowser.append('----------------------------------')
-                QApplication.processEvents()
-                if guiData['everyCheck']:
-                    QMessageBox.information(self, "提示信息", "有关键信息未填", QMessageBox.Yes)
-            else:
-                # 使用新的统一计算方法
-                revenueData = self.__class__.getRevenueDataUnified(self, guiData, configContent)
-                # revenueData = self.__class__.getRevenueData(self, guiData)
-
-                messageFlag = 1
-                if self.checkBox_5.isChecked():
-                    if guiData['salesName'] == '':
-                        reply = QMessageBox.question(self, '信息', 'Sales未填，是否继续', QMessageBox.Yes | QMessageBox.No,
-                                                     QMessageBox.Yes)
-                        if reply == QMessageBox.Yes:
-                            messageFlag = 1
-                        else:
-                            messageFlag = 2
-                if guiData['salesName'] != '' or messageFlag == 1:
-                    self.textBrowser.append("Sap No.:%s" % guiData['sapNo'])
-                    self.textBrowser.append("Project No.:%s" % guiData['projectNo'])
-                    self.textBrowser.append("Material Code:%s" % guiData['materialCode'])
-                    self.textBrowser.append("Global Partner Code:%s" % guiData['globalPartnerCode'])
-                    self.textBrowser.append("CS Name:%s" % guiData['csName'])
-                    self.textBrowser.append("Sales Name:%s" % guiData['salesName'])
-                    self.textBrowser.append("Amount:%s" % guiData['amount'])
-                    self.textBrowser.append("Cost:%s" % guiData['cost'])
-                    self.textBrowser.append("Currency Type:%s" % guiData['currencyType'])
-                    self.textBrowser.append("CHM Cost:%s" % revenueData['chmCost'])
-                    self.textBrowser.append("PHY Cost:%s" % revenueData['phyCost'])
-                    self.textBrowser.append("CHM Amount:%s" % revenueData['chmRe'])
-                    self.textBrowser.append("PHY Amount:%s" % revenueData['phyRe'])
-                    QApplication.processEvents()
-
-                    flag = 1
-                    # VA01
-                    if guiData['va01Check']:
-                        va01_res = self.sap_operate(guiData, revenueData, sap_obj, include_followup=False)
-                        if va01_res['flag'] == 1:
-                            # 是否要添加lab cost
-                            if guiData['labCostCheck'] and va01_res['flag'] == 1:
-                                data_b_res = sap_obj.lab_cost(guiData, revenueData)
-                                if data_b_res['flag'] == 0:
-                                    logMsg['Remark'] += data_b_res['msg']
-                                    self.textBrowser.append("<font color='red'>出错信息：%s </font>" % data_b_res['msg'])
-                                    QApplication.processEvents()
-                                    if guiData['everyCheck']:
-                                        QMessageBox.information(self, "错误提示", "出错信息：%s" % data_b_res['msg'],
-                                                                QMessageBox.Yes)
-                            if guiData['va02Check'] or guiData['saveCheck']:
-                                save_res = sap_obj.save_sap('VA01')
-                                if save_res['flag'] == 0:
-                                    flag = 0
-                                    logMsg['Remark'] += ';' + save_res['msg']
-                                    self.textBrowser.append("<font color='red'>出错信息：%s </font>" % save_res['msg'])
-                                    QApplication.processEvents()
-                                    if guiData['everyCheck']:
-                                        QMessageBox.information(self, "错误提示", "出错信息：%s" % save_res['msg'],
-                                                                QMessageBox.Yes)
-                        else:
-                            flag = 0
-                            logMsg['Remark'] += va01_res['msg']
-                            self.textBrowser.append("<font color='red'>出错信息：VA01出错；%s </font>" % va01_res['msg'])
-                            QApplication.processEvents()
-                            if guiData['everyCheck']:
-                                QMessageBox.information(self, "错误提示", "出错信息：%s" % va01_res['msg'],
-                                                        QMessageBox.Yes)
-                    # VA02
-                    if guiData['va02Check'] and flag == 1:
-                        va02_res = sap_obj.va02_operate(guiData, revenueData)
-                        logMsg['orderNo'] = va02_res['orderNo']
-                        self.textBrowser.append("Order No.:%s" % logMsg['orderNo'])
-                        QApplication.processEvents()
-                        if va02_res['flag'] == 1:
-                            amountVatStr = re.sub(r"(\d)(?=(\d\d\d)+(?!\d))", r"\1,",
-                                                  format(guiData['amountVat'], '.2f'))
-                            sapAmountVat = va02_res['sapAmountVat']
-                            self.textBrowser.append("Sap Amount Vat:%s" % sapAmountVat)
-                            self.textBrowser.append("Amount Vat:%s" % amountVatStr)
-                            QApplication.processEvents()
-                            # sapAmountVat在A2是数字，其它为字符串
-                            if sapAmountVat.strip() != amountVatStr:
-                                self.textBrowser.append("<font color='blue'>提示信息：SAP数据与ODM不一致，请确认并修改后再继续！！！ </font>")
-                                QApplication.processEvents()
-                                logMsg['Remark'] += ';' + 'SAP数据与ODM不一致，请确认并修改后再继续！！！'
-                                if guiData['everyCheck']:
-                                    reply = QMessageBox.question(self, '信息', 'SAP数据与ODM不一致，请确认并修改后再继续！！！',
-                                                                 QMessageBox.Yes | QMessageBox.No,
-                                                                 QMessageBox.Yes)
-                                    if reply == QMessageBox.No:
-                                        flag = 0
-                            if (guiData['vf01Check'] or guiData['saveCheck']) and flag == 1:
-                                sava_res = sap_obj.save_sap('VA02')
-                                if sava_res['flag'] == 0:
-                                    flag = 0
-                                    logMsg['Remark'] += ';' + sava_res['msg']
-                                    self.textBrowser.append("<font color='red'>出错信息：%s </font>" % sava_res['msg'])
-                                    QApplication.processEvents()
-                                    if guiData['everyCheck']:
-                                        QMessageBox.information(self, "错误提示", "出错信息：%s" % sava_res['msg'],
-                                                                QMessageBox.Yes)
-                        else:
-                            flag = 0
-                            logMsg['Remark'] += ';' + va02_res['msg']
-                            self.textBrowser.append("<font color='red'>出错信息：VA02出错；%s </font>" % va02_res['msg'])
-                            QApplication.processEvents()
-                            if guiData['everyCheck']:
-                                QMessageBox.information(self, "错误提示", "出错信息：%s" % va02_res['msg'],
-                                                        QMessageBox.Yes)
-
-                    # VF01
-                    if guiData['vf01Check'] and flag == 1:
-
-                        # save_res = sap_obj.save_sap('VF01准备前')
-                        # if save_res['flag'] == 0:
-                        #     logMsg['Remark'] += ';' + save_res['msg']
-                        #     self.textBrowser.append("<font color='red'>出错信息：%s </font>" % save_res['msg'])
-                        #     QApplication.processEvents()
-                        #     if guiData['everyCheck']:
-                        #         QMessageBox.information(self, "错误提示", "出错信息：%s" % save_res['msg'],
-                        #                                 QMessageBox.Yes)
-                        vf01_res = sap_obj.vf01_operate()
-                        if vf01_res['flag'] == 0:
-                            flag = 0
-                            logMsg['Remark'] += ';' + vf01_res['msg']
-                            self.textBrowser.append("<font color='red'>出错信息：VF01出错；%s </font>" % vf01_res['msg'])
-                            QApplication.processEvents()
-                            if guiData['everyCheck']:
-                                QMessageBox.information(self, "错误提示", "出错信息：%s" % vf01_res['msg'],
-                                                        QMessageBox.Yes)
-                    # VF03
-                    if guiData['vf03Check'] and flag == 1:
-                        vf03_res = sap_obj.vf03_operate()
-                        if vf03_res['flag'] == 0:
-                            logMsg['Remark'] += ';' + vf03_res['msg']
-                            self.textBrowser.append("<font color='red'>出错信息：VF03出错;%s </font>" % vf03_res['msg'])
-                            QApplication.processEvents()
-                            if guiData['everyCheck']:
-                                QMessageBox.information(self, "错误提示", "出错信息：%s" % vf03_res['msg'],
-                                                        QMessageBox.Yes)
-                        proformaNo = vf03_res['Proforma No.']
-                        logMsg['Proforma No.'] = proformaNo
-                        self.textBrowser.append("Proforma No.:%s" % proformaNo)
-                        QApplication.processEvents()
-                    self.textBrowser.append('SAP操作已完成')
-                    self.textBrowser.append('----------------------------------')
-                    QApplication.processEvents()
-                    if self.checkBox_5.isChecked():
-                        QMessageBox.information(self, "提示信息", "SAP操作已完成", QMessageBox.Yes)
-
-            return logMsg
-
-        except Exception as msg:
-            guiData = self.__class__.getGuiData(self)
-            self.textBrowser.append('这单%s的数据或者SAP有问题' % guiData['projectNo'])
-            self.textBrowser.append('错误信息：%s' % msg)
-            logMsg['Remark'] += '错误信息：%s' % msg
-            self.textBrowser.append('----------------------------------')
-            QMessageBox.information(self, "提示信息", '这单%s的数据或者SAP有问题' % guiData['projectNo'], QMessageBox.Yes)
-            return logMsg
+        """兼容旧调用入口；当前业务已改为通过 odmDataToSap 从多 sheet Excel 创建订单。"""
+        return {
+            'Remark': '当前业务已改为从 SAP_data 多 sheet 文件创建订单，请使用 odmDataToSap。',
+            'orderNo': '',
+            'Proforma No.': '',
+            'sapAmountVat': '',
+        }
     def orderUnlockOrLock(self, flag):
         fileUrl = self.lineEdit_6.text()
         (filepath, filename) = os.path.split(fileUrl)
@@ -845,6 +744,7 @@ class SapOrderMixin:
             QApplication.processEvents()
             os.startfile(Log_file)
         else:
-            self.textBrowser.append('没有文件请添加')
+            self.textBrowser.append('没有文件，请添加')
             QApplication.processEvents()
+
 
