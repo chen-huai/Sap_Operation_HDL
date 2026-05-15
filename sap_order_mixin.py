@@ -141,10 +141,12 @@ class SapOrderMixin:
 
             if sub_cost_center and sub_cost:
                 # Data B 只写 Sub Site Cost Center 和 Sub-Cost RMB 都有值的行。
+                # 携带 item 号供 SAP POSNR 字段定位；多 item（如 "1000;3000"）由下游裁剪。
                 data_b_entries.append({
                     'performer_cost_center': sub_cost_center,
                     'rate_cost_center': sub_cost_center,
                     'amount': sub_cost,
+                    'item': item_no,
                 })
 
                 # Plan Cost 中 FREMDL 按对应 item 汇总 Sub-Cost RMB。

@@ -218,9 +218,13 @@ class OrderTransaction:
                 performer_cost_center = str(entry.get("performer_cost_center", "")).strip()
                 rate_cost_center = str(entry.get("rate_cost_center", performer_cost_center)).strip()
                 amount = entry.get("amount", 0)
+                # 单条 Data B 只能对应一个 item，若上游传 "1000;3000" 这种多 item，
+                # 取第一个 ";" 之前的部分，保留 SAP POSNR 字段单值约束。
+                raw_item = str(entry.get("item", "")).strip()
+                item_no = raw_item.split(";", 1)[0].strip() if raw_item else ""
                 if not performer_cost_center and not rate_cost_center:
                     continue
-                # Data B 页签中同一行需要同时写执行部门、费率成本中心和固定价格。
+                # Data B 页签中同一行需要同时写执行部门、费率成本中心、item 号和固定价格。
                 self.session.set_text(
                     f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
                     f"tblSAPMV45AZULEISTENDE/ctxtTABL-KOSTL[0,{row}]",
@@ -231,6 +235,13 @@ class OrderTransaction:
                     f"tblSAPMV45AKOSTENSAETZE/ctxtTABD-KOSTL[0,{row}]",
                     rate_cost_center,
                 )
+                if item_no:
+                    # 新增 item 号写入；缺失时跳过，由 SAP 默认行为兜底。
+                    self.session.set_text(
+                        f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
+                        f"tblSAPMV45AKOSTENSAETZE/txtTABD-POSNR[1,{row}]",
+                        item_no,
+                    )
                 self.session.set_text(
                     f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
                     f"tblSAPMV45AKOSTENSAETZE/txtTABD-FESTPREIS[5,{row}]",
