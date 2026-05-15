@@ -182,7 +182,6 @@ class OrderTransaction:
             "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\10/"
             "ssubSUBSCREEN_BODY:SAPMV45A:4152/subSUBSCREEN_TEXT:SAPLV70T:2100/cmbLV70T-SPRAS"
         )
-        # TODO 同样的应该是直接更新为最新的文本内容
         self.session.set_text(text_id, order.short_text)
         self.session.set_selection_indexes(text_id, 11, 11)
         self.session.set_key(lang_id, "EN")
