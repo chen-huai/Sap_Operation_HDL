@@ -25,7 +25,18 @@ from theme_manager_theme import ThemeManager
 from Revenue_Operate import *
 from auto_updater.config_constants import CURRENT_VERSION
 from auto_updater import AutoUpdater, UI_AVAILABLE
-from sap import OrderData, OrderItemData, OrderService, PartnerOptions, RevenueData, SapConfig, SapResult, SapSession
+from sap import (
+    DataBEntry,
+    OrderData,
+    OrderItemData,
+    OrderService,
+    PartnerOptions,
+    PlanCostEntry,
+    RevenueData,
+    SapConfig,
+    SapResult,
+    SapSession,
+)
 from runtime_globals import configContent
 
 class SapOrderMixin:
@@ -139,60 +150,70 @@ class SapOrderMixin:
         )
 
     def _build_sub_entries_from_dataframe(self, order_row, sub_df):
-        """从 sub 表构建 Data B 和 Plan Cost 的直接写入明细。"""
+        """从 sub 表构建 Data B 和 Plan Cost 的直接写入明细。
+
+        Returns:
+            tuple[list[DataBEntry], dict[str, list[PlanCostEntry]]]:
+              - Data B: 按 sub 表行级保留（每条 sub 行一条 DataBEntry）。
+              - Plan Cost: 按 item 分组，每 item 一组 PlanCostEntry 列表。
+
+        Plan Cost 聚合规则：
+          - FREMDL：按 (item, cost_center) 聚合 Σ Sub-Cost RMB；
+            sub 行 Sub Site Cost Center 为空时使用订单 Cost Center 兜底。
+          - T01AST：按 item 聚合 Σ Sub Site Plan Hour；cost_center = 订单 Cost Center。
+        """
         order_sub_df = self._filter_related_rows(sub_df, order_row)
-        data_b_entries = []
-        plan_cost_entries_by_item = {}
         order_cost_center = self._excel_str(order_row.get('Cost Center'))
+
+        data_b_entries: list[DataBEntry] = []
+        # FREMDL 维度：(item_no, cost_center) → Σ Sub-Cost RMB
+        fremdl_summary: dict[tuple[str, str], float] = {}
+        # T01AST 维度：item_no → Σ Sub Site Plan Hour
+        t01ast_summary: dict[str, float] = {}
 
         for _, sub_row in order_sub_df.iterrows():
             item_no = self._excel_str(sub_row.get('item'))
-            sub_cost_center = self._excel_str(sub_row.get('Sub Site Cost Center'))
+            raw_sub_cc = self._excel_str(sub_row.get('Sub Site Cost Center'))
             sub_cost = self._excel_float(sub_row.get('Sub-Cost RMB'))
             plan_hour = self._excel_float(sub_row.get('Sub Site Plan Hour'))
 
-            if sub_cost_center and sub_cost:
-                # Data B 只写 Sub Site Cost Center 和 Sub-Cost RMB 都有值的行。
-                # 携带 item 号供 SAP POSNR 字段定位；多 item（如 "1000;3000"）由下游裁剪。
-                data_b_entries.append({
-                    'performer_cost_center': sub_cost_center,
-                    'rate_cost_center': sub_cost_center,
-                    'amount': sub_cost,
-                    'item': item_no,
-                })
+            # Data B 行级写入：保留每条 sub 行的明细。
+            if raw_sub_cc and sub_cost:
+                data_b_entries.append(DataBEntry(
+                    performer_cost_center=raw_sub_cc,
+                    rate_cost_center=raw_sub_cc,
+                    amount=sub_cost,
+                    item=item_no,
+                ))
 
-                # Plan Cost 中 FREMDL 按对应 item 汇总 Sub-Cost RMB。
-                plan_cost_entries_by_item.setdefault(item_no, []).append({
-                    'cost_center': sub_cost_center,
-                    'category': 'FREMDL',
-                    'amount': sub_cost,
-                })
+            # Plan Cost FREMDL：cost_center 缺失时兜底为订单 Cost Center。
+            if sub_cost:
+                fremdl_cc = raw_sub_cc or order_cost_center
+                if fremdl_cc:
+                    key = (item_no, fremdl_cc)
+                    fremdl_summary[key] = fremdl_summary.get(key, 0.0) + sub_cost
 
-            if order_cost_center and plan_hour:
-                # Plan Cost 中 T01AST 使用订单信息 Cost Center + Sub Site Plan Hour。
-                plan_cost_entries_by_item.setdefault(item_no, []).append({
-                    'cost_center': order_cost_center,
-                    'category': 'T01AST',
-                    'amount': plan_hour,
-                })
+            # Plan Cost T01AST：按 item 累计工时，cost_center 必须用订单 Cost Center。
+            if plan_hour and order_cost_center:
+                t01ast_summary[item_no] = t01ast_summary.get(item_no, 0.0) + plan_hour
 
-        summarized_plan_cost_entries = {}
-        for item_no, entries in plan_cost_entries_by_item.items():
-            summary = {}
-            for entry in entries:
-                key = (entry['cost_center'], entry['category'])
-                summary[key] = summary.get(key, 0) + entry['amount']
-            summarized_plan_cost_entries[item_no] = [
-                {
-                    'cost_center': cost_center,
-                    'category': category,
-                    'amount': amount,
-                }
-                for (cost_center, category), amount in summary.items()
-                if amount
-            ]
+        plan_cost_entries_by_item: dict[str, list[PlanCostEntry]] = {}
+        for (item_no, cost_center), amount in fremdl_summary.items():
+            if amount:
+                plan_cost_entries_by_item.setdefault(item_no, []).append(PlanCostEntry(
+                    cost_center=cost_center,
+                    category='FREMDL',
+                    amount=amount,
+                ))
+        for item_no, amount in t01ast_summary.items():
+            if amount:
+                plan_cost_entries_by_item.setdefault(item_no, []).append(PlanCostEntry(
+                    cost_center=order_cost_center,
+                    category='T01AST',
+                    amount=amount,
+                ))
 
-        return data_b_entries, summarized_plan_cost_entries
+        return data_b_entries, plan_cost_entries_by_item
 
     @staticmethod
     def _find_item_row(order, item_no):

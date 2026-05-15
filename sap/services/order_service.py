@@ -1,6 +1,14 @@
 """订单服务。"""
 
-from sap.models import OrderData, PartnerOptions, RevenueData, SapConfig, SapResult
+from sap.models import (
+    DataBEntry,
+    OrderData,
+    PartnerOptions,
+    PlanCostEntry,
+    RevenueData,
+    SapConfig,
+    SapResult,
+)
 from sap.session import SapSession
 from sap.transactions.order import OrderTransaction
 
@@ -34,12 +42,16 @@ class OrderService:
         """更新当前订单 item。"""
         return self.transaction.update_items(order, revenue)
 
-    def fill_lab_cost_entries(self, entries, *, auftragswert_cny: float = 0.0) -> SapResult:
-        """
-        按已计算好的 Data B 明细写入人工成本。
+    def fill_lab_cost_entries(
+        self,
+        entries: list[DataBEntry],
+        *,
+        auftragswert_cny: float = 0.0,
+    ) -> SapResult:
+        """按已计算好的 Data B 明细写入人工成本。
 
         Args:
-            entries: Data B 明细列表，每项包含 performer_cost_center、rate_cost_center、amount。
+            entries: Data B 明细列表（DataBEntry）。
             auftragswert_cny: 所有 item 加和金额（CNY）。≥ 阈值时回填订单价值字段。
 
         Returns:
@@ -47,12 +59,16 @@ class OrderService:
         """
         return self.transaction.fill_lab_cost_entries(entries, auftragswert_cny=auftragswert_cny)
 
-    def apply_plan_cost_entries(self, entries, *, focus_row: int = 0) -> SapResult:
-        """
-        按已计算好的计划成本明细写入计划成本。
+    def apply_plan_cost_entries(
+        self,
+        entries: list[PlanCostEntry],
+        *,
+        focus_row: int = 0,
+    ) -> SapResult:
+        """按已计算好的计划成本明细写入计划成本。
 
         Args:
-            entries: 计划成本明细列表，每项包含 cost_center、category、amount。
+            entries: 计划成本明细列表（PlanCostEntry）。
             focus_row: SAP item 表格中需要进入计划成本界面的行号。
 
         Returns:

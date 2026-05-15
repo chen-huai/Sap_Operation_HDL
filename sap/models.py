@@ -136,6 +136,37 @@ class CostOptions:
 
 
 @dataclass(slots=True)
+class DataBEntry:
+    """Data B 单行明细：写入 VA01/VA02 抬头 Data B 页签的一行成本记录。
+
+    - performer_cost_center: 执行部门成本中心（写入 TABL-KOSTL）。
+    - rate_cost_center: 费率成本中心（写入 TABD-KOSTL）；为空时取 performer_cost_center。
+    - amount: 固定价格（写入 TABD-FESTPREIS）。
+    - item: 关联 SAP item 号（写入 TABD-POSNR）；为空时由 SAP 默认行为兜底；
+            多 item（如 "1000;3000"）由下游裁剪取第一个。
+    """
+
+    performer_cost_center: str
+    rate_cost_center: str
+    amount: float
+    item: str = ""
+
+
+@dataclass(slots=True)
+class PlanCostEntry:
+    """Plan Cost 单条明细：写入计划成本编辑器表格的一行。
+
+    - cost_center: 成本中心（写入 RK70L-HERK2）。
+    - category: SAP 成本类别（写入 RK70L-HERK3），'FREMDL' 分包费用 / 'T01AST' 工时。
+    - amount: FREMDL 写金额、T01AST 写工时（写入 RK70L-MENGE）。
+    """
+
+    cost_center: str
+    category: str
+    amount: float
+
+
+@dataclass(slots=True)
 class HourData:
     """工时记录数据。"""
 

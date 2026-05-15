@@ -8,10 +8,12 @@
 
 from sap.models import (
     CostOptions,
+    DataBEntry,
     HourData,
     OrderData,
     OrderItemData,
     PartnerOptions,
+    PlanCostEntry,
     RevenueData,
     SapConfig,
     SapResult,
@@ -23,6 +25,7 @@ from sap.session import SapSession
 
 __all__ = [
     "CostOptions",
+    "DataBEntry",
     "HourData",
     "HourService",
     "InvoiceService",
@@ -30,6 +33,7 @@ __all__ = [
     "OrderItemData",
     "OrderService",
     "PartnerOptions",
+    "PlanCostEntry",
     "RevenueData",
     "SapConfig",
     "SapResult",

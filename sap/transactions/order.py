@@ -5,7 +5,16 @@ from __future__ import annotations
 import re
 import time
 
-from sap.models import OrderData, OrderItemData, PartnerOptions, RevenueData, SapConfig, SapResult
+from sap.models import (
+    DataBEntry,
+    OrderData,
+    OrderItemData,
+    PartnerOptions,
+    PlanCostEntry,
+    RevenueData,
+    SapConfig,
+    SapResult,
+)
 from sap.rules import resolve_data_a_key, should_fill_auftragswert
 from sap.session import SapSession
 
@@ -188,15 +197,17 @@ class OrderTransaction:
         self.session.focus(lang_id)
         self.session.send_vkey(0)
 
-    def fill_lab_cost_entries(self, entries, *, auftragswert_cny: float = 0.0) -> SapResult:
-        """
-        按已计算好的 Data B 明细写入人工成本。
+    def fill_lab_cost_entries(
+        self,
+        entries: list[DataBEntry],
+        *,
+        auftragswert_cny: float = 0.0,
+    ) -> SapResult:
+        """按已计算好的 Data B 明细写入人工成本。
 
         Args:
-            entries: Data B 明细列表，每项包含:
-                performer_cost_center: 执行部门成本中心。
-                rate_cost_center: 费率成本中心；为空时默认使用执行部门成本中心。
-                amount: Data B 固定价格。
+            entries: Data B 明细列表（DataBEntry）。
+            auftragswert_cny: 所有 item 加和金额（CNY），≥ 阈值时回填订单价值字段。
 
         Returns:
             SapResult: 写入成功或失败信息。
@@ -214,12 +225,11 @@ class OrderTransaction:
                     format(auftragswert_cny, ".2f"),
                 )
             for row, entry in enumerate(entries):
-                performer_cost_center = str(entry.get("performer_cost_center", "")).strip()
-                rate_cost_center = str(entry.get("rate_cost_center", performer_cost_center)).strip()
-                amount = entry.get("amount", 0)
+                performer_cost_center = entry.performer_cost_center.strip()
+                rate_cost_center = (entry.rate_cost_center or performer_cost_center).strip()
                 # 单条 Data B 只能对应一个 item，若上游传 "1000;3000" 这种多 item，
                 # 取第一个 ";" 之前的部分，保留 SAP POSNR 字段单值约束。
-                raw_item = str(entry.get("item", "")).strip()
+                raw_item = (entry.item or "").strip()
                 item_no = raw_item.split(";", 1)[0].strip() if raw_item else ""
                 if not performer_cost_center and not rate_cost_center:
                     continue
@@ -244,7 +254,7 @@ class OrderTransaction:
                 self.session.set_text(
                     f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
                     f"tblSAPMV45AKOSTENSAETZE/txtTABD-FESTPREIS[5,{row}]",
-                    amount,
+                    entry.amount,
                 )
         except Exception as exc:
             return SapResult.fail(f"Data B未填写，{exc}", step="lab_cost")
@@ -474,15 +484,16 @@ class OrderTransaction:
         """Format amount with thousands separators."""
         return re.sub(r"(\d)(?=(\d\d\d)+(?!\d))", r"\1,", format(amount, ".2f"))
 
-    def apply_plan_cost_entries(self, entries, *, focus_row: int = 0) -> SapResult:
-        """
-        按已计算好的计划成本明细写入计划成本。
+    def apply_plan_cost_entries(
+        self,
+        entries: list[PlanCostEntry],
+        *,
+        focus_row: int = 0,
+    ) -> SapResult:
+        """按已计算好的计划成本明细写入计划成本。
 
         Args:
-            entries: 计划成本明细列表，每项包含:
-                cost_center: 成本中心。
-                category: SAP 成本类别，例如 T01AST 或 FREMDL。
-                amount: 工时或金额。
+            entries: 计划成本明细列表（PlanCostEntry）。
             focus_row: SAP item 表格中需要进入计划成本界面的行号。
 
         Returns:
@@ -494,19 +505,9 @@ class OrderTransaction:
             self.session.press("wnd[0]/tbar[0]/btn[3]")
             self._open_plan_cost_editor(self._material_id(focus_row))
             for row, entry in enumerate(entries):
-                normalized_entry = type(
-                    "PlanCostEntryFromDataFrame",
-                    (),
-                    {
-                        "row": row,
-                        "cost_center": str(entry.get("cost_center", "")).strip(),
-                        "category": str(entry.get("category", "T01AST")).strip() or "T01AST",
-                        "amount": entry.get("amount", 0),
-                    },
-                )()
-                if not normalized_entry.cost_center:
+                if not entry.cost_center:
                     continue
-                self._apply_single_plan_cost_entry(normalized_entry)
+                self._apply_single_plan_cost_entry(row, entry)
             self.session.press("wnd[0]/tbar[0]/btn[3]")
             self.session.press("wnd[1]/usr/btnSPOP-OPTION1")
         except Exception as exc:
@@ -522,22 +523,26 @@ class OrderTransaction:
         self.session.press("wnd[1]/usr/btnSPOP-VAROPTION1")
         self.session.press("wnd[1]/tbar[0]/btn[0]")
 
-    def _apply_single_plan_cost_entry(self, entry) -> None:
-        """Apply one plan cost entry."""
-        self.session.set_text(f"wnd[0]/usr/tblSAPLKKDI1301_TC/ctxtRK70L-TYPPS[2,{entry.row}]", "E")
+    def _apply_single_plan_cost_entry(self, row: int, entry: PlanCostEntry) -> None:
+        """在 plan cost 编辑器表格的指定 row 写入一条 PlanCostEntry。
+
+        TYPPS=E 表示单条 entry；HERK2 为成本中心；HERK3 为类别（FREMDL/T01AST）；
+        MENGE 为数量/金额。统一使用 .2f 保留两位小数，避免之前对 T01AST 调用 round(0.4, 0)=0 把工时截空。
+        """
+        self.session.set_text(f"wnd[0]/usr/tblSAPLKKDI1301_TC/ctxtRK70L-TYPPS[2,{row}]", "E")
         self.session.set_text(
-            f"wnd[0]/usr/tblSAPLKKDI1301_TC/ctxtRK70L-HERK2[3,{entry.row}]",
+            f"wnd[0]/usr/tblSAPLKKDI1301_TC/ctxtRK70L-HERK2[3,{row}]",
             entry.cost_center,
         )
         self.session.set_text(
-            f"wnd[0]/usr/tblSAPLKKDI1301_TC/ctxtRK70L-HERK3[4,{entry.row}]",
+            f"wnd[0]/usr/tblSAPLKKDI1301_TC/ctxtRK70L-HERK3[4,{row}]",
             entry.category,
         )
         self.session.set_text(
-            f"wnd[0]/usr/tblSAPLKKDI1301_TC/txtRK70L-MENGE[6,{entry.row}]",
-            round(float(entry.amount), 0) if entry.category == "T01AST" else format(entry.amount, ".2f"),
+            f"wnd[0]/usr/tblSAPLKKDI1301_TC/txtRK70L-MENGE[6,{row}]",
+            format(float(entry.amount), ".2f"),
         )
-        self.session.focus(f"wnd[0]/usr/tblSAPLKKDI1301_TC/txtRK70L-MENGE[6,{entry.row}]", 20)
+        self.session.focus(f"wnd[0]/usr/tblSAPLKKDI1301_TC/txtRK70L-MENGE[6,{row}]", 20)
         self.session.send_vkey(0)
 
     def set_lock_state(self, *, unlocked: bool) -> SapResult:
