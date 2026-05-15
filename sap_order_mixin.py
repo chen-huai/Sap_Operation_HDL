@@ -110,10 +110,8 @@ class SapOrderMixin:
             global_partner_code=self._excel_str(order_row.get('GPC Code')),
             sales_name=self._excel_str(order_row.get('Sales')),
             sales_group=self._excel_str(order_row.get('Cost Center'))[-3:],
-            # TODO ECD需要更新 ecd=self._excel_str(order_row.get('ECD')),
-            ecd=time.strftime("%Y.%m.%d"),
+            ecd=self._excel_str(order_row.get('Ecd')),
             order_cost_center=self._excel_str(order_row.get('Order Center')),
-
             items=items,
         )
 
