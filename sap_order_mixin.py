@@ -25,7 +25,7 @@ from theme_manager_theme import ThemeManager
 from Revenue_Operate import *
 from auto_updater.config_constants import CURRENT_VERSION
 from auto_updater import AutoUpdater, UI_AVAILABLE
-from sap import OrderData, OrderItemData, OrderService, PartnerOptions, RevenueData, SapConfig, SapSession
+from sap import OrderData, OrderItemData, OrderService, PartnerOptions, RevenueData, SapConfig, SapResult, SapSession
 from runtime_globals import configContent
 
 class SapOrderMixin:
@@ -54,6 +54,20 @@ class SapOrderMixin:
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _excel_date_dot(value, default=''):
+        """读取 Excel 单元格日期值，统一格式化为 SAP 接受的 'YYYY.MM.DD'。
+
+        - pd.Timestamp / datetime / 各种字符串日期格式 → '2026.05.15'
+        - 空值 / NaT / 无法解析的字符串 → default（默认空串），避免污染 SAP
+        """
+        if pd.isna(value) or value == '':
+            return default
+        ts = pd.to_datetime(value, errors='coerce')
+        if pd.isna(ts):
+            return default
+        return ts.strftime('%Y.%m.%d')
 
     def _filter_related_rows(self, dataframe, order_row):
         """按 Combine Id 严格筛选当前订单对应的明细行；调用前需确保 Combine Id 存在。"""
@@ -110,7 +124,7 @@ class SapOrderMixin:
             global_partner_code=self._excel_str(order_row.get('GPC Code')),
             sales_name=self._excel_str(order_row.get('Sales')),
             sales_group=self._excel_str(order_row.get('Cost Center'))[-3:],
-            ecd=self._excel_str(order_row.get('Ecd')),
+            ecd=self._excel_date_dot(order_row.get('Ecd')),
             order_cost_center=self._excel_str(order_row.get('Order Center')),
             items=items,
         )
@@ -269,12 +283,40 @@ class SapOrderMixin:
                 data_b_entries, plan_cost_entries_by_item = self._build_sub_entries_from_dataframe(order_row, sub_df)
                 service = OrderService(sap_session, config)
 
-                if not order.sap_no or not order.project_no or not order.items:
-                    log_file.loc[index, 'Remark'] = '关键订单信息缺失'
+                # 按本次勾选的步骤分级校验：缺啥提示啥，支持只跑 Data B / Plan Cost 的分批验证场景。
+                need_va01_check = flow_options.get('va01Check')
+                need_va02_items_check = flow_options.get('va02Check')
+                need_data_b_check = flow_options.get('labCostCheck')
+                need_plan_cost_check = flow_options.get('planCostCheck')
+
+                # 订单号：优先 Excel；仅首行 + 单跑 Data B/Plan Cost 场景允许从 SAP 当前会话兜底读取
+                # （用户已手动打开 VA02 页面的情况）。后续行漏填则直接缺失报错，避免误写同一订单。
+                order_no = self._excel_str(order_row.get('Order Number'))
+                if (
+                    not order_no
+                    and index == 0
+                    and (need_data_b_check or need_plan_cost_check)
+                    and not need_va01_check
+                ):
+                    try:
+                        order_no = self._extract_order_no(sap_session)
+                    except Exception:
+                        order_no = ''
+
+                missing_fields = []
+                if need_va01_check and (not order.sap_no or not order.project_no):
+                    missing_fields.append('SAP No./Project No.')
+                if (need_va01_check or need_va02_items_check) and not order.items:
+                    missing_fields.append('items')
+                if (need_data_b_check or need_plan_cost_check) and not need_va01_check and not order_no:
+                    missing_fields.append('Order Number')
+
+                if missing_fields:
+                    missing_msg = '关键订单信息缺失（%s）' % '/'.join(missing_fields)
+                    log_file.loc[index, 'Remark'] = missing_msg
                     log_file.to_excel(log_data_path, merge_cells=False, index=False)
                     self.textBrowser.append(
-                        "<font color='red'>No.%s 关键订单信息缺失（SAP No./Project No./items 任一为空）</font>"
-                        % (index + 1)
+                        "<font color='red'>No.%s %s</font>" % (index + 1, missing_msg)
                     )
                     QApplication.processEvents()
                     continue
@@ -297,8 +339,7 @@ class SapOrderMixin:
 
                 remarks = []
                 # 业务流程：VA01(可选) → Save VA01 → 打开 VA02(可选) → Add Item → Data B(可选) → Plan Cost(可选) → Save VA02
-                # 所有步骤独立可选；跳过 VA01 时 order_no 取自 Excel 的 Order Number 列。
-                order_no = self._excel_str(order_row.get('Order Number'))
+                # 所有步骤独立可选；跳过 VA01 时 order_no 取自 Excel 的 Order Number 列（已在校验前读取）。
                 sap_amount_vat = ''
 
                 def _report_step(step_name, step_result):
@@ -330,17 +371,38 @@ class SapOrderMixin:
                 )
                 if need_save_va01:
                     save_va01_result = service.save('VA01')
-                    remarks.append(
-                        f"Save VA01:{save_va01_result.message}" if save_va01_result.message else "Save VA01"
-                    )
                     if save_va01_result.success:
                         saved_order_no = self._extract_order_no(sap_session)
                         if saved_order_no:
                             order_no = saved_order_no
+                        else:
+                            # SAP 保存命令未抛错但读不到订单号（业务级静默失败）→ 视为 VA01 段失败，
+                            # 否则下游 VA02/Data B/Plan Cost 会用空/残留订单号继续执行。
+                            va01_done = False
+                            save_va01_result = SapResult.fail(
+                                "Save VA01 后未能读取到 Order No.", step="save"
+                            )
+                    else:
+                        # Save VA01 显式失败 → 视为 VA01 段失败，由 va01_blocked 守卫拦截后续步骤。
+                        va01_done = False
+                    remarks.append(
+                        f"Save VA01:{save_va01_result.message}" if save_va01_result.message else "Save VA01"
+                    )
                     _report_step('Save VA01', save_va01_result)
 
                 # Step 3-6: VA02 段。只要勾选了 va02Check / labCostCheck / planCostCheck 任意一项，就需要进入 VA02。
-                need_va02 = (flow_options.get('va02Check'))
+                # 当 VA01 被勾选但失败（va01_blocked=True）时短路 VA02 段，
+                # 避免 SAP VA02 窗体残留上一个订单号导致 Add Item / Data B / Plan Cost 误写入上一单。
+                has_va02_step = need_va02_items_check or need_data_b_check or need_plan_cost_check
+                va01_blocked = bool(flow_options.get('va01Check')) and not va01_done
+                need_va02 = not va01_blocked and has_va02_step
+
+                # VA01 失败导致 VA02 段被跳过时给出红字提示，避免用户以为流程在静默运行。
+                if va01_blocked and has_va02_step:
+                    self.textBrowser.append(
+                        "<font color='red'>VA01 失败，跳过当前订单的 VA02/Data B/Plan Cost 步骤</font>"
+                    )
+                    QApplication.processEvents()
 
                 if need_va02:
                     open_result = service.open_order(order_no)
