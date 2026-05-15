@@ -23,6 +23,23 @@ class OrderTransaction:
         """Return today in SAP date format."""
         return time.strftime("%Y.%m.%d")
 
+    def _safe_read_order_no(self, fallback: str = "") -> str:
+        """多重兜底读取当前订单号: 抬头 VBELN → 状态栏数字 → fallback。"""
+        try:
+            order_no = (self.session.read_text("wnd[0]/usr/ctxtVBAK-VBELN") or "").strip()
+            if order_no:
+                return order_no
+        except Exception:
+            pass
+        try:
+            status_text = self.session.read_status() or ""
+            match = re.search(r"(\d{6,})", status_text)
+            if match:
+                return match.group(1)
+        except Exception:
+            pass
+        return fallback
+
     def create(self, order: OrderData, revenue: RevenueData, options: PartnerOptions) -> SapResult:
         """Create order header in VA01."""
         result = SapResult(step="va01")
@@ -172,7 +189,7 @@ class OrderTransaction:
         self.session.focus(lang_id)
         self.session.send_vkey(0)
 
-    def fill_lab_cost_entries(self, entries) -> SapResult:
+    def fill_lab_cost_entries(self, entries, *, auftragswert_cny: float = 0.0) -> SapResult:
         """
         按已计算好的 Data B 明细写入人工成本。
 
@@ -187,6 +204,16 @@ class OrderTransaction:
         """
         result = SapResult(step="lab_cost")
         try:
+            # 进入售达方，data b：最大化主窗口，进入抬头视图，切换到 T\14 页签。
+            self.session.press("wnd[0]/usr/subSUBSCREEN_HEADER:SAPMV45A:4021/btnBT_HEAD")
+            self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14")
+            # 所有 item 加和金额（CNY）达到阈值时回填订单价值字段。
+            if auftragswert_cny >= self.config.revenue_threshold:
+                self.session.set_text(
+                    "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/"
+                    "ssubSUBSCREEN_BODY:SAPMV45A:4312/txtZAUFTD-AUFTRAGSWERT",
+                    format(auftragswert_cny, ".2f"),
+                )
             for row, entry in enumerate(entries):
                 performer_cost_center = str(entry.get("performer_cost_center", "")).strip()
                 rate_cost_center = str(entry.get("rate_cost_center", performer_cost_center)).strip()
@@ -258,10 +285,37 @@ class OrderTransaction:
         """Open an existing order in VA02."""
         result = SapResult(step="open_va02")
         try:
+            # 先读用户在 SAP VA02 输入框中预填的值；/NVA02 命令会清空界面，需提前保存。
+            prefilled_order_no = ""
+            try:
+                prefilled_order_no = (
+                    self.session.read_text("wnd[0]/usr/ctxtVBAK-VBELN") or ""
+                ).strip()
+            except Exception:
+                prefilled_order_no = ""
+
             self.session.set_text("wnd[0]/tbar[0]/okcd", "/NVA02")
             self.session.send_vkey(0)
-            self.session.set_text("wnd[0]/usr/ctxtVBAK-VBELN", order_no)
+
+            # 优先级：调用方传入的 order_no > 用户预填值；两者皆空时让 SAP 自己报错。
+            target_order_no = (str(order_no).strip() if order_no else "") or prefilled_order_no
+            if target_order_no:
+                self.session.set_text("wnd[0]/usr/ctxtVBAK-VBELN", target_order_no)
             self.session.send_vkey(0)
+
+            # SAP 左下角状态栏出现 E 类错误时，说明输入框为空或订单号错误。
+            try:
+                msg_type = self.session.find("wnd[0]/sbar").messageType
+                msg_text = self.session.read_status()
+            except Exception:
+                msg_type, msg_text = "", ""
+            if msg_type == "E":
+                return SapResult.fail(
+                    f"Order No 打开失败: {msg_text or '订单号为空或不存在'}",
+                    step="open_va02",
+                )
+            # 进入 VA02 抬头后多重兜底读取订单号，避免抬头 VBELN 控件读取失败时丢失 order_no。
+            result.order_no = self._safe_read_order_no(fallback=target_order_no)
         except Exception as exc:
             return SapResult.fail(f"该Order No {order_no} 未打开，{exc}", step="open_va02")
         return result
@@ -270,21 +324,23 @@ class OrderTransaction:
         """Add item rows to current order."""
         result = SapResult(step="va02")
         try:
-            order_no = self.session.read_text("wnd[0]/usr/ctxtVBAK-VBELN")
-            result.order_no = order_no
-            result.sap_amount_vat = self._write_item_rows(order)
+            # 进入 item 前先把 order_no 兜底进 result，确保从 VA02 直接开始的场景也能回传订单号。
+            result.order_no = self._safe_read_order_no()
+            result.sap_amount_vat = self._write_item_rows(order, result)
+            # item 写完后 SAP 回到 VA02 抬头，再次刷新 order_no，覆盖更准确的值。
+            result.order_no = self._safe_read_order_no(fallback=result.order_no)
             return result
 
         except Exception as exc:
             return SapResult.fail(f"Order add item failed: {exc}", step="va02")
-        return result
 
     def update_items(self, order: OrderData, revenue: RevenueData) -> SapResult:
         """Update current order items after VA02 is open."""
         result = SapResult(step="va02_update")
         try:
-            result.order_no = self.session.read_text("wnd[0]/usr/ctxtVBAK-VBELN")
-            result.sap_amount_vat = self._write_item_rows(order)
+            result.order_no = self._safe_read_order_no()
+            result.sap_amount_vat = self._write_item_rows(order, result)
+            result.order_no = self._safe_read_order_no(fallback=result.order_no)
         except Exception as exc:
             return SapResult.fail(f"Order update item failed: {exc}", step="va02_update")
         return result
@@ -295,7 +351,7 @@ class OrderTransaction:
             raise ValueError("order.items is required")
         return items
 
-    def _write_item_rows(self, order: OrderData) -> str:
+    def _write_item_rows(self, order: OrderData, result: SapResult) -> str:
         items = self._resolve_order_items(order)
         sap_amount_total = 0.0
         sap_amount_text = ""
@@ -310,6 +366,9 @@ class OrderTransaction:
             amount_text = self._write_item_condition(format(item.revenue, ".2f"))
             sap_amount_text = amount_text
             sap_amount_total += self._parse_amount(amount_text)
+            # condition 写完仍处于 item 详情视图，借机写入 Long Text 后再返回 item 列表。
+            if item.long_text:
+                self._write_item_long_text(item.long_text, result)
             self.session.press("wnd[0]/tbar[0]/btn[3]")
 
         if len(items) > 1:

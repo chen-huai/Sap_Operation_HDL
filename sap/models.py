@@ -48,6 +48,7 @@ class OrderItemData:
 
     item: str = ""
     material_code: str = ""
+    long_text: str = ""
     revenue: float = 0.0
     quantity: str = "1"
     unit: str = "pu"

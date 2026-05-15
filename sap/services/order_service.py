@@ -34,17 +34,18 @@ class OrderService:
         """更新当前订单 item。"""
         return self.transaction.update_items(order, revenue)
 
-    def fill_lab_cost_entries(self, entries) -> SapResult:
+    def fill_lab_cost_entries(self, entries, *, auftragswert_cny: float = 0.0) -> SapResult:
         """
         按已计算好的 Data B 明细写入人工成本。
 
         Args:
             entries: Data B 明细列表，每项包含 performer_cost_center、rate_cost_center、amount。
+            auftragswert_cny: 所有 item 加和金额（CNY）。≥ 阈值时回填订单价值字段。
 
         Returns:
             SapResult: SAP 写入结果。
         """
-        return self.transaction.fill_lab_cost_entries(entries)
+        return self.transaction.fill_lab_cost_entries(entries, auftragswert_cny=auftragswert_cny)
 
     def apply_plan_cost_entries(self, entries, *, focus_row: int = 0) -> SapResult:
         """

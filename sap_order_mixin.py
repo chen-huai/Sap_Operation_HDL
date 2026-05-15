@@ -94,6 +94,7 @@ class SapOrderMixin:
             items.append(OrderItemData(
                 item=self._excel_str(item_row.get('item')),
                 material_code=self._excel_str(item_row.get('Item Material Code')),
+                long_text=self._excel_str(item_row.get('Item Group Description')),
                 revenue=self._excel_float(item_row.get('Item price')),
                 quantity='1',
                 unit='pu',
@@ -343,19 +344,31 @@ class SapOrderMixin:
 
                 if need_va02:
                     open_result = service.open_order(order_no)
+                    # 直接从 VA02 开始时，Excel 'Order Number' 可能为空；优先取 open_result，再兜底从 SAP 提取。
+                    order_no = open_result.order_no or order_no or self._extract_order_no(sap_session)
                     remarks.append(f"VA02:{open_result.message}" if open_result.message else "VA02")
                     _report_step('Open VA02', open_result)
+                    if order_no:
+                        # 立即在显示框反馈识别到的订单号，便于直接开始 VA02 场景的用户确认。
+                        self.textBrowser.append("识别到 Order No.: %s" % order_no)
+                        QApplication.processEvents()
 
                     if open_result.success:
                         # add item 仅在 va02Check 时进行；纯 Data B / Plan Cost 场景不重复加 item。
                         if flow_options.get('va02Check'):
                             item_result = service.add_items(order, revenue)
+                            order_no = item_result.order_no or order_no
                             remarks.append(f"Item:{item_result.message}" if item_result.message else "Item")
                             sap_amount_vat = item_result.sap_amount_vat or sap_amount_vat
                             _report_step('Add Item', item_result)
 
                         if flow_options.get('labCostCheck') and data_b_entries:
-                            data_b_result = service.fill_lab_cost_entries(data_b_entries)
+                            # items 加和换算 CNY，传给 service 用于判断是否回填订单价值字段。
+                            items_revenue_total_cny = items_revenue_total * (order.exchange_rate or 1.0)
+                            data_b_result = service.fill_lab_cost_entries(
+                                data_b_entries,
+                                auftragswert_cny=items_revenue_total_cny,
+                            )
                             remarks.append(
                                 f"Data B:{data_b_result.message}" if data_b_result.message else "Data B"
                             )
@@ -383,6 +396,31 @@ class SapOrderMixin:
                             )
                             _report_step('Save VA02', save_va02_result)
 
+                    # VA02 段结束后再做一次最终兜底，覆盖中间步骤未回传 order_no 的边界情况。
+                    if not order_no:
+                        order_no = self._extract_order_no(sap_session)
+
+                # SAP 加和金额本身已经含税，理论上应等于 Excel "Tax-inclusive amount"。
+                # 容差 0.01 容忍浮点误差；只有在 Excel 含税金额可用时才比较，避免空值误判。
+                try:
+                    sap_amount_value = float(str(sap_amount_vat).replace(',', '')) if sap_amount_vat else 0.0
+                except (TypeError, ValueError):
+                    sap_amount_value = 0.0
+                try:
+                    excel_amount_value = float(str(excel_amount_vat).replace(',', '')) if excel_amount_vat else 0.0
+                except (TypeError, ValueError):
+                    excel_amount_value = 0.0
+
+                amount_diff = round(sap_amount_value - excel_amount_value, 2)
+                amount_mismatch = excel_amount_value > 0 and abs(amount_diff) >= 0.01
+                if amount_mismatch:
+                    diff_msg = (
+                        f"含税金额不一致: Excel={format(excel_amount_value, ',.2f')} "
+                        f"SAP={format(sap_amount_value, ',.2f')} "
+                        f"差额={format(amount_diff, ',.2f')}"
+                    )
+                    remarks.append(diff_msg)
+
                 log_file.loc[index, 'Order No.'] = order_no
                 log_file.loc[index, 'Remark'] = ';'.join([item for item in remarks if item])
                 log_file.loc[index, 'Proforma No.'] = ''
@@ -390,17 +428,13 @@ class SapOrderMixin:
                 log_file.loc[index, 'Update Time'] = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
                 log_file.to_excel(log_data_path, merge_cells=False, index=False)
 
-                # 订单结束摘要：order no、SAP 加和金额、按 6% 税率换算的含税金额。
-                try:
-                    sap_amount_value = float(str(sap_amount_vat).replace(',', '')) if sap_amount_vat else 0.0
-                except (TypeError, ValueError):
-                    sap_amount_value = 0.0
-                calc_amount_with_vat = sap_amount_value * 1.06
+                # 订单结束摘要：order no + SAP 含税金额；与 Excel 含税金额一致性提示。
                 self.textBrowser.append("Order No.: %s" % order_no)
-                self.textBrowser.append("SAP 金额(加和): %s" % (sap_amount_vat or '--'))
-                self.textBrowser.append(
-                    "计算含税金额(按 6%% 税率): %s" % format(calc_amount_with_vat, ',.2f')
-                )
+                self.textBrowser.append("SAP 金额(加和,含税): %s" % (sap_amount_vat or '--'))
+                if amount_mismatch:
+                    self.textBrowser.append("<font color='red'>%s</font>" % diff_msg)
+                elif excel_amount_value > 0:
+                    self.textBrowser.append("含税金额一致(Excel == SAP)")
                 self.textBrowser.append('----------------------------------')
                 QApplication.processEvents()
 
@@ -459,6 +493,7 @@ class SapOrderMixin:
                     items.append(OrderItemData(
                         item=_to_str(raw_item.get('item')),
                         material_code=material_code,
+                        long_text=_to_str(raw_item.get('long_text', raw_item.get('Item Group Description'))),
                         revenue=_to_float(raw_item.get('revenue', raw_item.get('amount'))),
                         quantity=_to_str(raw_item.get('quantity')) or '1',
                         unit=_to_str(raw_item.get('unit')) or 'pu',
