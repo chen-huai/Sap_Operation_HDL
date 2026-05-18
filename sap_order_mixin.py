@@ -450,6 +450,7 @@ class SapOrderMixin:
                             items_revenue_total_cny = items_revenue_total * (order.exchange_rate or 1.0)
                             data_b_result = service.fill_lab_cost_entries(
                                 data_b_entries,
+                                order,
                                 auftragswert_cny=items_revenue_total_cny,
                             )
                             remarks.append(

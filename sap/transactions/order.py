@@ -200,6 +200,7 @@ class OrderTransaction:
     def fill_lab_cost_entries(
         self,
         entries: list[DataBEntry],
+        order: OrderData,
         *,
         auftragswert_cny: float = 0.0,
     ) -> SapResult:
@@ -207,6 +208,7 @@ class OrderTransaction:
 
         Args:
             entries: Data B 明细列表（DataBEntry）。
+            order: 订单数据，用于读取 sales_group 决定是否写入 item 号。
             auftragswert_cny: 所有 item 加和金额（CNY），≥ 阈值时回填订单价值字段。
 
         Returns:
@@ -244,8 +246,8 @@ class OrderTransaction:
                     f"tblSAPMV45AKOSTENSAETZE/ctxtTABD-KOSTL[0,{row}]",
                     rate_cost_center,
                 )
-                if item_no:
-                    # 新增 item 号写入；缺失时跳过，由 SAP 默认行为兜底。
+                if item_no or order.sales_group != '240':
+                    # 新增 item 号写入；缺失和sales_group为240时跳过，由 SAP 默认行为兜底。
                     self.session.set_text(
                         f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
                         f"tblSAPMV45AKOSTENSAETZE/txtTABD-POSNR[1,{row}]",

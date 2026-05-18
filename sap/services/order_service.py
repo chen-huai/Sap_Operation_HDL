@@ -45,6 +45,7 @@ class OrderService:
     def fill_lab_cost_entries(
         self,
         entries: list[DataBEntry],
+        order: OrderData,
         *,
         auftragswert_cny: float = 0.0,
     ) -> SapResult:
@@ -52,12 +53,13 @@ class OrderService:
 
         Args:
             entries: Data B 明细列表（DataBEntry）。
+            order: 订单数据，用于读取 sales_group 决定是否写入 item 号。
             auftragswert_cny: 所有 item 加和金额（CNY）。≥ 阈值时回填订单价值字段。
 
         Returns:
             SapResult: SAP 写入结果。
         """
-        return self.transaction.fill_lab_cost_entries(entries, auftragswert_cny=auftragswert_cny)
+        return self.transaction.fill_lab_cost_entries(entries, order, auftragswert_cny=auftragswert_cny)
 
     def apply_plan_cost_entries(
         self,
