@@ -131,7 +131,7 @@ class SapOrderMixin:
             amount_vat=self._excel_str(order_row.get('Tax-inclusive amount')),
             currency_type=self._excel_str(order_row.get('Currency')),
             exchange_rate=self._excel_float(order_row.get('Rate'), 1.0),
-            short_text=self._excel_str(order_row.get('Additional Information')),
+            short_text=self._excel_str(order_row.get('售达方的文本')),
             global_partner_code=self._excel_str(order_row.get('GPC Code')),
             sales_name=self._excel_str(order_row.get('Sales')),
             sales_group=self._excel_str(order_row.get('Cost Center'))[-3:],
