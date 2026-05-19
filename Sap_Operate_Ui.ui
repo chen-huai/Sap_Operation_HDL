@@ -7,8 +7,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1113</width>
-    <height>771</height>
+    <width>1167</width>
+    <height>803</height>
    </rect>
   </property>
   <property name="sizePolicy">
@@ -34,7 +34,7 @@
     <item>
      <widget class="QTabWidget" name="tabWidget">
       <property name="currentIndex">
-       <number>0</number>
+       <number>1</number>
       </property>
       <widget class="QWidget" name="tab_2">
        <attribute name="title">
@@ -607,22 +607,6 @@
              </property>
             </widget>
            </item>
-           <item row="1" column="4">
-            <widget class="QPushButton" name="pushButton_17">
-             <property name="sizePolicy">
-              <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
-               <horstretch>0</horstretch>
-               <verstretch>0</verstretch>
-              </sizepolicy>
-             </property>
-             <property name="statusTip">
-              <string>根据ODM数据，循环创建Order</string>
-             </property>
-             <property name="text">
-              <string>Fill in the SAP for ODM Data</string>
-             </property>
-            </widget>
-           </item>
            <item row="1" column="2">
             <widget class="QPushButton" name="pushButton_12">
              <property name="sizePolicy">
@@ -636,27 +620,6 @@
              </property>
              <property name="text">
               <string>Clear</string>
-             </property>
-            </widget>
-           </item>
-           <item row="1" column="3">
-            <widget class="QPushButton" name="pushButton_11">
-             <property name="sizePolicy">
-              <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
-               <horstretch>0</horstretch>
-               <verstretch>0</verstretch>
-              </sizepolicy>
-             </property>
-             <property name="font">
-              <font>
-               <pointsize>10</pointsize>
-              </font>
-             </property>
-             <property name="statusTip">
-              <string>点击后开始SAP操作</string>
-             </property>
-             <property name="text">
-              <string>Fill in the SAP</string>
              </property>
             </widget>
            </item>
@@ -687,6 +650,22 @@
              </property>
             </widget>
            </item>
+           <item row="1" column="3" colspan="2">
+            <widget class="QPushButton" name="pushButton_17">
+             <property name="sizePolicy">
+              <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+               <horstretch>0</horstretch>
+               <verstretch>0</verstretch>
+              </sizepolicy>
+             </property>
+             <property name="statusTip">
+              <string>根据ODM数据，循环创建Order</string>
+             </property>
+             <property name="text">
+              <string>Fill in the SAP for ODM Data</string>
+             </property>
+            </widget>
+           </item>
           </layout>
          </widget>
         </item>
@@ -706,8 +685,8 @@
             <rect>
              <x>0</x>
              <y>0</y>
-             <width>533</width>
-             <height>597</height>
+             <width>555</width>
+             <height>619</height>
             </rect>
            </property>
            <attribute name="label">
@@ -1209,8 +1188,8 @@
             <rect>
              <x>0</x>
              <y>0</y>
-             <width>533</width>
-             <height>597</height>
+             <width>555</width>
+             <height>619</height>
             </rect>
            </property>
            <attribute name="label">
@@ -2687,7 +2666,7 @@
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>1113</width>
+     <width>1167</width>
      <height>25</height>
     </rect>
    </property>
