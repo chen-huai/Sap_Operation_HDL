@@ -217,8 +217,17 @@ class SapOrderMixin:
 
     @staticmethod
     def _find_item_row(order, item_no):
-        """根据 item 编号找到 SAP item 表格中的行号。"""
-        for row, item in enumerate(order.items):
+        """根据 item 编号找到 SAP item 表格中的物理行号。
+
+        SAP VA02 item 概览页会按 POSNR（item 号）升序自动重排，与 Excel 原始顺序无关。
+        因此本函数按 item 号数字升序排序后再 enumerate，保证返回值与 SAP 物理行号一致；
+        item 号非数字或为空时排到末尾，避免污染主排序。
+        """
+        sorted_items = sorted(
+            (it for it in order.items if it.item),
+            key=lambda it: int(it.item) if it.item.isdigit() else float('inf'),
+        )
+        for row, item in enumerate(sorted_items):
             if item.item == item_no:
                 return row
         return 0

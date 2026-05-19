@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import time
 
+from sap.exceptions import SapUiError
 from sap.models import (
     DataBEntry,
     OrderData,
@@ -246,7 +247,7 @@ class OrderTransaction:
                     f"tblSAPMV45AKOSTENSAETZE/ctxtTABD-KOSTL[0,{row}]",
                     rate_cost_center,
                 )
-                if item_no or order.sales_group != '240':
+                if item_no and order.sales_group != '240':
                     # 新增 item 号写入；缺失和sales_group为240时跳过，由 SAP 默认行为兜底。
                     self.session.set_text(
                         f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
@@ -503,8 +504,9 @@ class OrderTransaction:
         """
         result = SapResult(step="plan_cost")
         try:
-            # 计划成本入口依赖当前 item 行焦点，先回到 item 概览页并聚焦目标行。
-            self.session.press("wnd[0]/tbar[0]/btn[3]")
+            # 幂等切到 item 概览页：消除对前置步骤（Data B / Add Item / 多 item 循环）页面状态的隐式依赖。
+            # 旧实现盲按 btn[3]，多 item 循环第二次会从 item 概览再退一级，触发"保存？"弹窗并把数据写错行。
+            self._ensure_item_overview()
             self._open_plan_cost_editor(self._material_id(focus_row))
             for row, entry in enumerate(entries):
                 if not entry.cost_center:
@@ -516,11 +518,28 @@ class OrderTransaction:
             return SapResult.fail(f"plan cost未添加成功，{exc}", step="plan_cost")
         return result
 
+    def _ensure_item_overview(self) -> None:
+        """幂等切到 VA02 item 概览页。
+
+        item 概览页的 tab strip ID 是 ``tabsTAXI_TABSTRIP_OVERVIEW``，
+        抬头页则是 ``tabsTAXI_TABSTRIP_HEAD``；前者能 find 到即说明当前在 item 概览，可直接返回。
+        否则按一次 btn[3] 从抬头页（Data B 完成后的 T\\14 tab）退回 item 概览。
+        """
+        try:
+            self.session.find("wnd[0]/usr/tabsTAXI_TABSTRIP_OVERVIEW")
+            return
+        except SapUiError:
+            pass
+        # 当前不在 item 概览：可能停在抬头页（刚做完 Data B）或其他子视图，退一级即可。
+        self.session.press("wnd[0]/tbar[0]/btn[3]")
+
     def _open_plan_cost_editor(self, focus_element_id: str) -> None:
         """Open plan cost editor for focused item."""
         self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_OVERVIEW/tabpT\\02")
-        # 计划成本菜单依赖当前焦点 item，必须先把光标放到目标物料行。
-        self.session.focus(focus_element_id, 10)
+        # 计划成本菜单依赖当前焦点 item，必须先 setFocus 锁定目标行：
+        # ctxtRV45A-MABNR[1,0] 对应 item 1000，[1,1] 对应 item 2000，以此类推。
+        # caretPosition 与录制脚本保持一致取 0，避免物料编号短于光标位置时的越界。
+        self.session.focus(focus_element_id, 0)
         self.session.find("wnd[0]/mbar/menu[3]/menu[7]").select()
         self.session.press("wnd[1]/usr/btnSPOP-VAROPTION1")
         self.session.press("wnd[1]/tbar[0]/btn[0]")
