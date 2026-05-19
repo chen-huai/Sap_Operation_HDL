@@ -17,7 +17,6 @@ from PyQt5.QtCore import QDate
 from PyQt5.QtGui import QIcon, QFontDatabase
 from Get_Data import *
 from PDF_Parser_Utils import extract_company_name, extract_revenue, extract_fapiao_no, parse_pdf_fields, PDF_Operate
-from Sap_Function import *
 from Data_Table import *
 from Logger import *
 from Excel_Field_Mapper import excel_field_mapper
@@ -25,7 +24,17 @@ from theme_manager_theme import ThemeManager
 from Revenue_Operate import *
 from auto_updater.config_constants import CURRENT_VERSION
 from auto_updater import AutoUpdater, UI_AVAILABLE
-from sap import CostOptions, OrderData, OrderService, PartnerOptions, RevenueData, SapConfig, SapSession
+from sap import (
+    CostOptions,
+    HourData,
+    HourService,
+    OrderData,
+    OrderService,
+    PartnerOptions,
+    RevenueData,
+    SapConfig,
+    SapSession,
+)
 from runtime_globals import configContent, myWin, staff_dict
 
 class HourMixin:
@@ -308,6 +317,7 @@ class HourMixin:
             'Update'
         ]
         log_obj = Logger(log_file=log_file, columns=columns)
+        sap_session = None
         try:
             # 获取文件路径
             hour_path = self.lineEdit_31.text()
@@ -324,8 +334,37 @@ class HourMixin:
             # 重命名字段
             renamed_data = get_data.rename_hour_fields(raw_data, configContent['Hour_Field_Mapping'])
 
-            # 初始化SAP操作对象
-            sap = Sap()
+            # 初始化 SAP 会话与工时服务（全程单 session，结束时统一关闭）
+            sap_session = SapSession.connect()
+            hour_service = HourService(sap_session)
+
+            def to_hour_data(r):
+                """将 DataFrame 行转换为 HourData 对象；缺失字段安全降级。"""
+                def _s(v):
+                    if pd.isna(v):
+                        return ''
+                    if isinstance(v, float) and v.is_integer():
+                        return str(int(v))
+                    return str(v).strip()
+
+                def _f(v):
+                    if pd.isna(v) or v == '':
+                        return 0.0
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        return 0.0
+
+                return HourData(
+                    staff_id=_s(r.get('staff_id', '')),
+                    week=_s(r.get('week', '')),
+                    allocated_day=_s(r.get('allocated_day', '')),
+                    order_no=_s(r.get('order_no', '')),
+                    item=_s(r.get('item', '')),
+                    material_code=_s(r.get('material_code', '')),
+                    allocated_hours=_f(r.get('allocated_hours', 0)),
+                    office_time=_f(r.get('office_time', 0)),
+                )
 
             # 记录当前处理的staff_id和week
             current_staff_id = None
@@ -356,8 +395,8 @@ class HourMixin:
                 if staff_id != current_staff_id or week != current_week:
                     # 如果不是第一次登录，需要先保存之前的工时
                     if not is_first_login:
-                        save_res = sap.save_hours()
-                        if not save_res['flag']:
+                        save_res = hour_service.save()
+                        if not save_res.success:
                             error_msg = f"保存工时失败！Staff ID: {current_staff_id}, Week: {current_week}"
                             # logger.error(error_msg)
                             log_data.update({
@@ -376,8 +415,8 @@ class HourMixin:
                             })
 
                     # 登录SAP
-                    login_res = sap.login_hour_gui(row)
-                    if not login_res['flag']:
+                    login_res = hour_service.login(to_hour_data(row))
+                    if not login_res.success:
                         # logger.error(error_msg):
                         error_msg = f"登录SAP失败！Staff ID: {staff_id}, Week: {week}"
                         # logger.error(error_msg)
@@ -413,10 +452,9 @@ class HourMixin:
                     #     'project': row['project'],
                     #     'description': row['description']
                     # }
-                    hour_data = row
-                    # 调用recording_hours方法记录工时
-                    recording_res = sap.recording_hours(hour_data)
-                    if not recording_res['flag']:
+                    # 调用 HourService.record 方法记录工时
+                    recording_res = hour_service.record(to_hour_data(row))
+                    if not recording_res.success:
                         # logger.error(error_msg):
                         error_msg = f"记录工时失败！Staff ID: {staff_id}, Week: {week}"
                         # logger.error(error_msg)
@@ -479,8 +517,8 @@ class HourMixin:
 
             # 最后一次保存
             if not is_first_login:
-                save_res = sap.save_hours()
-                if not save_res['flag']:
+                save_res = hour_service.save()
+                if not save_res.success:
                     error_msg = f"最后一次保存工时失败！Staff ID: {current_staff_id}, Week: {current_week}"
                     # logger.error(error_msg)
                     log_data.update({
@@ -513,4 +551,7 @@ class HourMixin:
             log_obj.save_log_to_excel()
             os.startfile(log_file)
             self.textBrowser_4.append(f"错误：处理过程中出现错误: {str(e)}\n日志文件保存在：{log_file}")
+        finally:
+            if sap_session is not None:
+                sap_session.close()
 

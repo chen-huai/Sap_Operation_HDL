@@ -18,7 +18,6 @@ from PyQt5.QtCore import QDate
 from PyQt5.QtGui import QIcon, QFontDatabase
 from Get_Data import *
 from PDF_Parser_Utils import extract_company_name, extract_revenue, extract_fapiao_no, parse_pdf_fields, PDF_Operate
-from Sap_Function import *
 from Data_Table import *
 from Logger import *
 from Excel_Field_Mapper import excel_field_mapper
@@ -398,8 +397,6 @@ class ConfigMixin:
         guiData['chmHourlyRate'] = float(self.doubleSpinBox_6.text())
         guiData['phyHourlyRate'] = float(self.doubleSpinBox_8.text())
         guiData['shortText'] = self.lineEdit_5.text()
-        guiData['materialCode'] = getattr(self, 'current_material_code', '')
-        guiData['longText'] = getattr(self, 'current_long_text', '')
         guiData['planCostRate'] = float(self.doubleSpinBox_7.text())
         guiData['significantDigits'] = int(self.spinBox_5.text())
         guiData['chmCostRate'] = float(self.doubleSpinBox_9.text())

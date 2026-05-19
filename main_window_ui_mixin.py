@@ -17,7 +17,6 @@ from PyQt5.QtCore import QDate
 from PyQt5.QtGui import QIcon, QFontDatabase
 from Get_Data import *
 from PDF_Parser_Utils import extract_company_name, extract_revenue, extract_fapiao_no, parse_pdf_fields, PDF_Operate
-from Sap_Function import *
 from Data_Table import *
 from Logger import *
 from Excel_Field_Mapper import excel_field_mapper

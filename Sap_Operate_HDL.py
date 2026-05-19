@@ -19,7 +19,6 @@ from Get_Data import *
 # File_Operate 已合并，方法已内联到 MyMainWindow
 # PDF_Operate 已合并到 PDF_Parser_Utils
 from PDF_Parser_Utils import extract_company_name, extract_revenue, extract_fapiao_no, parse_pdf_fields, PDF_Operate
-from Sap_Function import *
 from Sap_Operate_Ui import Ui_MainWindow
 from Data_Table import *
 from Logger import *
@@ -86,8 +85,6 @@ class MyMainWindow(MainWindowUiMixin, ConfigMixin, SapOrderMixin, OdmInvoiceMixi
 
         # 设置自动更新功能
         self.setup_auto_update()
-        self.pushButton_11.clicked.connect(self.sap_operate)
-        # self.pushButton_11.clicked.connect(self.sapOperate)
         self.pushButton_12.clicked.connect(self.textBrowser.clear)
         self.pushButton_20.clicked.connect(self.textBrowser_2.clear)
         self.pushButton_16.clicked.connect(self.getFileUrl)
