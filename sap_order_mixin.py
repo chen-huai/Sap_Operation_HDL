@@ -153,7 +153,14 @@ class SapOrderMixin:
         )
 
     def _build_order_from_dataframes(self, order_row, item_df):
-        """从订单头和 item 表构建 SAP 订单对象。"""
+        """从订单头和 item 表构建 SAP 订单对象。
+
+        items 列表会按 item 号数字升序做稳定排序，让 list 索引语义对齐 SAP VA02
+        item 概览页回车后的物理 row 顺序（SAP 按 POSNR 升序自动重排）。
+        空 / 非数字 item 保持 Excel 相对顺序排到末尾，对应 SAP 自动分配新号的行。
+        排序后的不变量"order.items 索引 = SAP 物理 row"贯穿 _write_item_rows、
+        _find_item_row 和 plan cost 循环，消除上游 Excel 顺序与 SAP 行号错位的隐患。
+        """
         order_items_df = self._filter_related_rows(item_df, order_row)
         items = []
         for _, item_row in order_items_df.iterrows():
@@ -166,6 +173,8 @@ class SapOrderMixin:
                 quantity='1',
                 unit='pu',
             ))
+
+        items = self._sort_items_for_sap(items)
 
         return OrderData(
             sap_no=self._excel_str(order_row.get('SAP Customer Code')),
@@ -258,18 +267,36 @@ class SapOrderMixin:
         return data_b_entries, plan_cost_entries_by_item
 
     @staticmethod
-    def _find_item_row(order, item_no):
-        """根据 item 编号找到 SAP item 表格中的物理行号。
+    def _sort_items_for_sap(items):
+        """按 SAP VA02 item 概览页 POSNR 升序的物理 row 顺序对 items 排序。
 
-        SAP VA02 item 概览页会按 POSNR（item 号）升序自动重排，与 Excel 原始顺序无关。
-        因此本函数按 item 号数字升序排序后再 enumerate，保证返回值与 SAP 物理行号一致；
-        item 号非数字或为空时排到末尾，避免污染主排序。
+        SAP 在写完 item 号并按回车后会自动按 POSNR 升序重排；本方法在适配层
+        提前完成等效排序，让 order.items 列表顺序 == SAP 写入后的物理 row 顺序。
+
+        排序规则：
+            - 有效数字 item → 按数字升序（key=(0, int)）
+            - 空 / 非数字 item → 保持原相对顺序，整体排到末尾（key=(1, idx)）
+
+        排序键采用 (bucket, secondary) 元组而非 float('inf')，保证 sorted 的稳定
+        性同时对非数字 item 维持 Excel 原相对顺序。
         """
-        sorted_items = sorted(
-            (it for it in order.items if it.item),
-            key=lambda it: int(it.item) if it.item.isdigit() else float('inf'),
-        )
-        for row, item in enumerate(sorted_items):
+        def _key(indexed):
+            idx, item = indexed
+            raw = (item.item or '').strip()
+            if raw.isdigit():
+                return (0, int(raw), idx)
+            return (1, 0, idx)
+
+        return [item for _, item in sorted(enumerate(items), key=_key)]
+
+    @staticmethod
+    def _find_item_row(order, item_no):
+        """根据 item 编号定位 SAP item 表格中的物理行号。
+
+        order.items 已由 _sort_items_for_sap 在适配层排好序，list 索引即 SAP 物理 row；
+        本方法直接 enumerate 查找即可，无需再次排序。找不到时返回 0 作为兜底。
+        """
+        for row, item in enumerate(order.items):
             if item.item == item_no:
                 return row
         return 0
@@ -513,17 +540,22 @@ class SapOrderMixin:
                             _report_step('Data B', data_b_result)
 
                         if flow_options.get('planCostCheck'):
-                            for item_no, plan_cost_entries in plan_cost_entries_by_item.items():
-                                focus_row = self._find_item_row(order, item_no)
+                            # 按 order.items 顺序（即 SAP 物理 row 顺序）调度 plan cost，
+                            # 避免字典插入顺序（来自 sub 表出现顺序）与 SAP 行号顺序不一致；
+                            # sub 表未提供 plan cost 数据的 item 直接跳过。
+                            for row, item in enumerate(order.items):
+                                plan_cost_entries = plan_cost_entries_by_item.get(item.item)
+                                if not plan_cost_entries:
+                                    continue
                                 plan_result = service.apply_plan_cost_entries(
-                                    plan_cost_entries, focus_row=focus_row
+                                    plan_cost_entries, focus_row=row
                                 )
                                 remarks.append(
-                                    f"Plan Cost {item_no}:{plan_result.message}"
+                                    f"Plan Cost {item.item}:{plan_result.message}"
                                     if plan_result.message
-                                    else f"Plan Cost {item_no}"
+                                    else f"Plan Cost {item.item}"
                                 )
-                                _report_step('Plan Cost %s' % item_no, plan_result)
+                                _report_step('Plan Cost %s' % item.item, plan_result)
 
                         if flow_options.get('saveCheck'):
                             save_va02_result = service.save('VA02')
