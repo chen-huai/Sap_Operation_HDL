@@ -385,6 +385,38 @@ class SapOrderMixin:
                 # 将当前订单关键字段回填到 GUI 控件，便于用户实时跟踪正在处理的订单。
                 self._apply_order_row_to_gui(order_row)
 
+                # everyCheck（checkBox_16）：每单开始前弹窗让用户确认是否处理；
+                # 选 No 跳过当前订单（log 标记），继续下一单。放在 GUI 回填后、对象构建前，
+                # 避免对跳过单做无谓的 DataFrame 转换和 SAP 校验。
+                if flow_options.get('everyCheck'):
+                    combine_id_preview = self._excel_str(order_row.get('Combine Id'))
+                    project_no_preview = self._excel_str(order_row.get('Request Number'))
+                    cs_preview = self._excel_str(order_row.get('Primary CS'))
+                    sales_preview = self._excel_str(order_row.get('Sales'))
+                    confirm_msg = (
+                        '是否处理 No.%s 订单？\n\n'
+                        'Combine Id: %s\n'
+                        'Request Number: %s\n'
+                        'Primary CS: %s\n'
+                        'Sales: %s\n\n'
+                        '点击 Yes 继续，No 跳过当前订单'
+                    ) % (index + 1, combine_id_preview, project_no_preview, cs_preview, sales_preview)
+                    reply = QMessageBox.question(
+                        self,
+                        '订单确认',
+                        confirm_msg,
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.Yes,
+                    )
+                    if reply != QMessageBox.Yes:
+                        log_file.loc[index, 'Remark'] = '用户选择跳过'
+                        log_file.to_excel(log_data_path, merge_cells=False, index=False)
+                        self.textBrowser.append(
+                            "<font color='orange'>No.%s 用户选择跳过</font>" % (index + 1)
+                        )
+                        QApplication.processEvents()
+                        continue
+
                 # 三张 DataFrame 已包含完整业务数据，这里只做对象适配和 SAP 写入。
                 order = self._build_order_from_dataframes(order_row, item_df)
                 revenue = self._build_revenue_from_order_row(order_row)
@@ -466,7 +498,14 @@ class SapOrderMixin:
                 # Step 1: VA01 创建订单头
                 va01_done = False
                 if flow_options.get('va01Check'):
-                    create_result = service.create_order(order, revenue)
+                    # contactCheck（checkBox_19）：未勾选时 add_contact=False，
+                    # _fill_partners 内部跳过联系人写入；add_sales_partner 保持默认。
+                    partner_options = PartnerOptions(
+                        add_contact=bool(flow_options.get('contactCheck')),
+                    )
+                    create_result = service.create_order(
+                        order, revenue, partner_options=partner_options
+                    )
                     remarks.append(f"VA01:{create_result.message}" if create_result.message else "VA01")
                     order_no = create_result.order_no or order_no
                     sap_amount_vat = create_result.sap_amount_vat or sap_amount_vat
