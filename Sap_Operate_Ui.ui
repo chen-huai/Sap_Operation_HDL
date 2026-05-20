@@ -7,8 +7,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1167</width>
-    <height>803</height>
+    <width>1163</width>
+    <height>794</height>
    </rect>
   </property>
   <property name="sizePolicy">
@@ -685,8 +685,8 @@
             <rect>
              <x>0</x>
              <y>0</y>
-             <width>555</width>
-             <height>619</height>
+             <width>540</width>
+             <height>687</height>
             </rect>
            </property>
            <attribute name="label">
@@ -1188,8 +1188,8 @@
             <rect>
              <x>0</x>
              <y>0</y>
-             <width>555</width>
-             <height>619</height>
+             <width>553</width>
+             <height>587</height>
             </rect>
            </property>
            <attribute name="label">
@@ -2666,8 +2666,8 @@
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>1167</width>
-     <height>25</height>
+     <width>1163</width>
+     <height>29</height>
     </rect>
    </property>
    <widget class="QMenu" name="menuFile">

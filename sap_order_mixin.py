@@ -13,7 +13,7 @@ import shutil
 import logging
 
 from PyQt5.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox, QVBoxLayout, QPushButton, QAction, QLabel
-from PyQt5.QtCore import QDate
+from PyQt5.QtCore import QDate, QSignalBlocker
 from PyQt5.QtGui import QIcon, QFontDatabase
 from Get_Data import *
 from PDF_Parser_Utils import extract_company_name, extract_revenue, extract_fapiao_no, parse_pdf_fields, PDF_Operate
@@ -85,6 +85,49 @@ class SapOrderMixin:
             return dataframe
         combine_id = self._excel_value(order_row.get('Combine Id'))
         return dataframe[dataframe['Combine Id'] == combine_id]
+
+    def _apply_order_row_to_gui(self, order_row):
+        """将订单行 Excel 数据回填到主界面控件，便于用户实时跟踪当前订单。
+
+        取值口径与 _build_order_from_dataframes / _build_sap_config_from_order_row 保持一致：
+          - 未税金额优先 'Revenue'，兜底 'Untaxed amount'（与 _build_revenue_from_order_row 对齐）
+          - 汇率默认 1.0
+        comboBox 用 QSignalBlocker 包裹，避免触发任何已绑定（或未来误绑）的信号槽。
+        Excel 中的 CS/Sales 若不在 configContent 中，setCurrentText 会静默保留原值，给出黄字提示但不阻断流程。
+        """
+        sap_no = self._excel_str(order_row.get('SAP Customer Code'))
+        project_no = self._excel_str(order_row.get('Request Number'))
+        currency_type = self._excel_str(order_row.get('Currency'))
+        exchange_rate = self._excel_float(order_row.get('Rate'), 1.0)
+        global_partner_code = self._excel_str(order_row.get('GPC Code'))
+        cs_name = self._excel_str(order_row.get('Primary CS'))
+        sales_name = self._excel_str(order_row.get('Sales'))
+        amount = self._excel_float(
+            order_row.get('Revenue'),
+            self._excel_float(order_row.get('Untaxed amount')),
+        )
+
+        self.lineEdit.setText(sap_no)
+        self.lineEdit_2.setText(project_no)
+        self.lineEdit_3.setText(global_partner_code)
+        self.doubleSpinBox.setValue(exchange_rate)
+        self.doubleSpinBox_2.setValue(amount)
+
+        with QSignalBlocker(self.comboBox):
+            self.comboBox.setCurrentText(currency_type)
+        with QSignalBlocker(self.comboBox_2):
+            self.comboBox_2.setCurrentText(cs_name)
+        with QSignalBlocker(self.comboBox_3):
+            self.comboBox_3.setCurrentText(sales_name)
+
+        if cs_name and cs_name not in configContent:
+            self.textBrowser.append(
+                "<font color='orange'>CS [%s] 不在配置文件中，csCode 将为空</font>" % cs_name
+            )
+        if sales_name and sales_name not in configContent:
+            self.textBrowser.append(
+                "<font color='orange'>Sales [%s] 不在配置文件中，salesCode 将为空</font>" % sales_name
+            )
 
     def _build_sap_config_from_order_row(self, order_row):
         """按当前订单行和系统配置构建 SAP 固定参数。"""
@@ -304,6 +347,9 @@ class SapOrderMixin:
                     log_file.loc[index, 'Remark'] = '缺失 Combine Id，无法关联 item/sub'
                     log_file.to_excel(log_data_path, merge_cells=False, index=False)
                     continue
+
+                # 将当前订单关键字段回填到 GUI 控件，便于用户实时跟踪正在处理的订单。
+                self._apply_order_row_to_gui(order_row)
 
                 # 三张 DataFrame 已包含完整业务数据，这里只做对象适配和 SAP 写入。
                 order = self._build_order_from_dataframes(order_row, item_df)

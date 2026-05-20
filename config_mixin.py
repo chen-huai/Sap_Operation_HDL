@@ -376,18 +376,9 @@ class ConfigMixin:
         self.doubleSpinBox_4.setValue(amount * 1.06)
     def getGuiData(self):
         guiData = {}
-        guiData['sapNo'] = self.lineEdit.text()
-        guiData['projectNo'] = self.lineEdit_2.text()
-        guiData['currencyType'] = self.comboBox.currentText()
-        guiData['exchangeRate'] = float(self.doubleSpinBox.text())
-        guiData['globalPartnerCode'] = self.lineEdit_3.text()
-        guiData['csName'] = self.comboBox_2.currentText()
-        if guiData['csName'] != '':
-            guiData['csCode'] = configContent[guiData['csName']]
-        guiData['salesName'] = self.comboBox_3.currentText()
-        if guiData['salesName'] != '':
-            guiData['salesCode'] = configContent[guiData['salesName']]
-        guiData['amount'] = float(self.doubleSpinBox_2.text())
+        # 订单级字段（sapNo/projectNo/currencyType/exchangeRate/globalPartnerCode/
+        # csName/csCode/salesName/salesCode/amount）已由 odmDataToSap 从 Excel 读取，
+        # 并通过 SapOrderMixin._apply_order_row_to_gui 回填到 GUI 控件，无需在此重复读取。
         if self.checkBox_27.isChecked():
             guiData['cost'] = float(self.doubleSpinBox_3.text())/1.06
         else:
