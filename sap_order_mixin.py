@@ -366,6 +366,13 @@ class SapOrderMixin:
             log_file['sapAmountVat'] = ''
             log_file['Update Time'] = '未开Order'
 
+            # 列顺序优化：核心追踪字段（业务键、订单号、备注）置顶，便于人工查阅 log。
+            # 优先列中缺失的列自动跳过，避免 order_df 字段命名变更时直接报错。
+            priority_cols = ['Combine Id', 'Request Number', 'Order No.', 'Remark']
+            existing_priority = [col for col in priority_cols if col in log_file.columns]
+            other_cols = [col for col in log_file.columns if col not in existing_priority]
+            log_file = log_file[existing_priority + other_cols]
+
             sap_session = SapSession.connect()
 
             for index, order_row in order_df.iterrows():
