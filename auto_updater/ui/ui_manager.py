@@ -15,11 +15,20 @@
 import logging
 import os
 from typing import Optional, Any
-from PyQt5.QtWidgets import QMainWindow, QMessageBox, QMenuBar, QMenu, QAction, QWidget
-from PyQt5.QtCore import QObject, pyqtSignal
+from PyQt5.QtWidgets import (
+    QMainWindow,
+    QMessageBox,
+    QMenuBar,
+    QMenu,
+    QAction,
+    QWidget,
+    QProgressDialog,
+)
+from PyQt5.QtCore import QObject, Qt, pyqtSignal
 
 from .dialogs import UpdateProgressDialog, AboutDialog
 from .resources import UpdateUIText
+from .async_check_thread import UpdateCheckThread
 
 # 获取模块专用日志记录器
 logger = logging.getLogger(__name__)
@@ -71,6 +80,14 @@ class UpdateUIManager(QObject):
         # 状态标志
         self._is_initialized = False
         self._is_menu_setup = False
+
+        # 启动检查异步线程（持引用避免被 GC）
+        self._check_thread: Optional[UpdateCheckThread] = None
+
+        # 手点更新异步状态（与启动检查独立，避免相互干扰）
+        self._manual_check_thread: Optional[UpdateCheckThread] = None
+        self._manual_check_dialog: Optional[QProgressDialog] = None
+        self._manual_check_cancelled: bool = False
 
         logger.info("UpdateUIManager 初始化完成")
 
@@ -183,10 +200,18 @@ class UpdateUIManager(QObject):
 
     def check_for_updates_with_ui(self, force_check: bool = True) -> None:
         """
-        检查更新（带UI交互）
+        检查更新（带UI交互）— 异步执行，避免 GUI 主线程阻塞
 
         Args:
             force_check: 是否强制检查更新
+
+        Note:
+            改造说明（2026-05-20）：
+            - 原实现在主线程同步调用 self.auto_updater.check_for_updates() →
+              requests.get() 网络异常时 GUI 卡死最长 ≈ 166 秒（HTTPAdapter Retry +
+              @network_retry 双层重试 + 频率限制 sleep(60)）
+            - 现改为 UpdateCheckThread 异步执行 + QProgressDialog 忙等 + 可取消
+            - 结果通过 check_finished 信号回主线程 _on_manual_check_finished 处理
         """
         try:
             logger.info("actionUpdate按钮被点击，开始执行更新检查")
@@ -200,35 +225,113 @@ class UpdateUIManager(QObject):
                 )
                 return
 
+            # 防重入：手点检查线程仍在跑则直接返回，避免重复创建对话框
+            if (
+                self._manual_check_thread is not None
+                and self._manual_check_thread.isRunning()
+            ):
+                logger.debug("手点更新检查仍在进行中，忽略重复点击")
+                return
+
+            # 重置取消标志
+            self._manual_check_cancelled = False
+
             # 显示检查进度（如果父窗口有文本浏览器）
             self._show_status_message(UpdateUIText.CHECKING_UPDATE_MESSAGE)
 
-            # 执行更新检查
-            has_update, remote_version, local_version, error = self.auto_updater.check_for_updates(
-                force_check=force_check
+            # 创建忙等对话框（range=0,0 即 indeterminate 旋转动画）
+            dialog = QProgressDialog(
+                UpdateUIText.CHECKING_UPDATE_MESSAGE,
+                "取消",
+                0,
+                0,
+                self.parent,
+            )
+            dialog.setWindowTitle(UpdateUIText.CHECK_UPDATE_TITLE)
+            dialog.setWindowModality(Qt.ApplicationModal)
+            # 去掉标题栏的 ? 帮助按钮，保持简洁
+            dialog.setWindowFlags(
+                dialog.windowFlags() & ~Qt.WindowContextHelpButtonHint
+            )
+            dialog.setMinimumDuration(0)  # 立即显示，不等 4 秒默认延迟
+            dialog.setAutoClose(False)
+            dialog.setAutoReset(False)
+            dialog.canceled.connect(self._on_manual_check_cancelled)
+
+            # 创建并启动异步检查线程
+            thread = UpdateCheckThread(
+                auto_updater=self.auto_updater,
+                is_silent=False,
+                force_check=force_check,
+                parent=self,
+            )
+            thread.check_finished.connect(self._on_manual_check_finished)
+            thread.finished.connect(thread.deleteLater)
+            thread.finished.connect(self._clear_manual_check_refs)
+
+            self._manual_check_thread = thread
+            self._manual_check_dialog = dialog
+
+            dialog.show()
+            thread.start()
+
+        except Exception as e:
+            logger.error(f"检查更新异常: {e}")
+            # 异常路径兜底清理
+            self._safe_close_manual_dialog()
+            QMessageBox.critical(
+                self.parent,
+                UpdateUIText.ERROR_TITLE,
+                f"{UpdateUIText.CHECK_UPDATE_ERROR_MESSAGE}\n{str(e)}"
             )
 
+    def _on_manual_check_finished(
+        self,
+        has_update: bool,
+        remote_version,
+        local_version: str,
+        error,
+    ) -> None:
+        """
+        手点更新的异步检查结果处理槽（主线程执行）
+
+        Args:
+            has_update: 是否发现新版本
+            remote_version: 远程版本号（可能为 None）
+            local_version: 本地版本号
+            error: 错误信息（可能为 None）
+        """
+        # 不论何种结果，先关闭忙等对话框
+        self._safe_close_manual_dialog()
+
+        # 用户已点取消：静默丢弃结果，不再弹任何对话框
+        if self._manual_check_cancelled:
+            logger.debug("手点检查已被取消，丢弃异步结果")
+            return
+
+        try:
             if error:
                 QMessageBox.warning(
                     self.parent,
                     UpdateUIText.CHECK_UPDATE_FAILED_TITLE,
-                    f"{UpdateUIText.CHECK_UPDATE_FAILED_MESSAGE}\n{error}"
+                    f"{UpdateUIText.CHECK_UPDATE_FAILED_MESSAGE}\n{error}",
                 )
-                self._show_status_message(f"{UpdateUIText.CHECK_UPDATE_FAILED_MESSAGE}: {error}")
+                self._show_status_message(
+                    f"{UpdateUIText.CHECK_UPDATE_FAILED_MESSAGE}: {error}"
+                )
                 return
 
-            if has_update:
+            if has_update and remote_version:
                 # 发现新版本
                 reply = QMessageBox.question(
                     self.parent,
                     UpdateUIText.NEW_VERSION_FOUND_TITLE,
                     UpdateUIText.NEW_VERSION_FOUND_MESSAGE.format(
                         remote_version=remote_version,
-                        local_version=local_version
+                        local_version=local_version,
                     ),
-                    QMessageBox.Yes | QMessageBox.No
+                    QMessageBox.Yes | QMessageBox.No,
                 )
-
                 if reply == QMessageBox.Yes:
                     self.start_update_process(remote_version)
                 else:
@@ -238,17 +341,63 @@ class UpdateUIManager(QObject):
                 QMessageBox.information(
                     self.parent,
                     UpdateUIText.CHECK_UPDATE_TITLE,
-                    UpdateUIText.LATEST_VERSION_MESSAGE
+                    UpdateUIText.LATEST_VERSION_MESSAGE,
                 )
                 self._show_status_message(UpdateUIText.LATEST_VERSION_MESSAGE)
 
         except Exception as e:
-            logger.error(f"检查更新异常: {e}")
+            logger.error(f"处理手点检查结果异常: {e}")
             QMessageBox.critical(
                 self.parent,
                 UpdateUIText.ERROR_TITLE,
-                f"{UpdateUIText.CHECK_UPDATE_ERROR_MESSAGE}\n{str(e)}"
+                f"{UpdateUIText.CHECK_UPDATE_ERROR_MESSAGE}\n{str(e)}",
             )
+
+    def _on_manual_check_cancelled(self) -> None:
+        """
+        用户点击「取消」按钮：标记取消、关闭对话框、状态提示
+
+        Note:
+            QThread 在 requests.get() 中无法真正中断，
+            线程会继续在后台跑完，结果到达后被 _on_manual_check_finished 静默丢弃
+        """
+        try:
+            logger.info("用户取消了手点更新检查")
+            self._manual_check_cancelled = True
+
+            # 声明式中断请求（即使无效也无害）
+            if (
+                self._manual_check_thread is not None
+                and self._manual_check_thread.isRunning()
+            ):
+                self._manual_check_thread.requestInterruption()
+
+            self._safe_close_manual_dialog()
+            self._show_status_message("已取消更新检查")
+
+        except Exception as e:
+            logger.debug(f"取消手点检查处理异常（静默）: {e}")
+
+    def _clear_manual_check_refs(self) -> None:
+        """线程 finished 信号触发后清空引用，便于下次点击重新启动。"""
+        self._manual_check_thread = None
+        self._manual_check_dialog = None
+
+    def _safe_close_manual_dialog(self) -> None:
+        """安全关闭手点检查的忙等对话框（幂等）。"""
+        try:
+            dialog = self._manual_check_dialog
+            if dialog is not None:
+                # 断开 canceled 信号，避免 close() 触发递归
+                try:
+                    dialog.canceled.disconnect(self._on_manual_check_cancelled)
+                except (TypeError, RuntimeError):
+                    pass
+                dialog.close()
+                dialog.deleteLater()
+                self._manual_check_dialog = None
+        except Exception as e:
+            logger.debug(f"关闭手点检查对话框异常（静默）: {e}")
 
     def show_about_dialog(self) -> None:
         """显示关于对话框"""
@@ -320,40 +469,80 @@ class UpdateUIManager(QObject):
 
     def _perform_startup_check(self) -> None:
         """
-        执行启动更新检查（静默模式）
+        启动后台线程执行版本检查（不阻塞 GUI 主线程）
 
-        启动检查特点：
-        - 使用 is_silent=True，不返回间隔错误信息
-        - 只在有真正更新时才提示用户
-        - 完全忽略"间隔过短"等情况，保持静默
+        改造说明：
+        - 原实现在主线程同步调用 requests.get()，网络异常时 GUI 卡死最长 ≈ 166 秒
+        - 现改为 UpdateCheckThread 异步执行；结果通过信号回主线程槽 _on_startup_check_finished 处理
         """
         try:
-            # 静默模式：间隔未到时不返回错误信息
-            has_update, remote_version, local_version, error = self.auto_updater.check_for_updates(is_silent=True)
+            # 防止重复启动：若上次线程未结束，跳过本次
+            if self._check_thread is not None and self._check_thread.isRunning():
+                logger.debug("启动检查线程仍在运行，跳过本次")
+                return
 
+            thread = UpdateCheckThread(
+                auto_updater=self.auto_updater,
+                is_silent=True,
+                force_check=False,
+                parent=self,
+            )
+            thread.check_finished.connect(self._on_startup_check_finished)
+            # 线程结束后自动清理，避免内存泄漏
+            thread.finished.connect(thread.deleteLater)
+            thread.finished.connect(self._clear_check_thread_ref)
+
+            self._check_thread = thread
+            thread.start()
+
+        except Exception as e:
+            # 启动检查异常也静默处理，避免打扰用户
+            logger.debug(f"启动更新检查异常（静默）: {e}")
+
+    def _on_startup_check_finished(
+        self,
+        has_update: bool,
+        remote_version,
+        local_version: str,
+        error,
+    ) -> None:
+        """
+        启动检查结果处理槽（主线程执行）
+
+        Args:
+            has_update: 是否发现新版本
+            remote_version: 远程版本号（可能为 None）
+            local_version: 本地版本号
+            error: 错误信息（可能为 None）
+        """
+        try:
             # 只有在有更新且无错误时才提示用户
-            if has_update and error is None:
+            if has_update and error is None and remote_version:
                 reply = QMessageBox.question(
                     self.parent,
                     UpdateUIText.NEW_VERSION_FOUND_TITLE,
                     UpdateUIText.NEW_VERSION_FOUND_MESSAGE.format(
                         remote_version=remote_version,
-                        local_version=local_version
+                        local_version=local_version,
                     ),
-                    QMessageBox.Yes | QMessageBox.No
+                    QMessageBox.Yes | QMessageBox.No,
                 )
 
                 if reply == QMessageBox.Yes:
                     self.start_update_process(remote_version)
 
-            # 静默忽略所有其他情况：
-            # - 无更新（has_update=False）
-            # - 间隔未到（error=None, has_update=False）
-            # - 真正的错误（error不为None），但也静默处理避免打扰用户
+            # 静默忽略其他情况：无更新 / 间隔未到 / 网络错误
+            else:
+                logger.debug(
+                    f"启动检查无操作 (has_update={has_update}, error={error})"
+                )
 
         except Exception as e:
-            # 启动检查异常也静默处理，避免打扰用户
-            logger.debug(f"启动更新检查异常（静默）: {e}")
+            logger.debug(f"启动检查结果处理异常（静默）: {e}")
+
+    def _clear_check_thread_ref(self) -> None:
+        """线程结束后清空引用，便于下次创建。"""
+        self._check_thread = None
 
     def _find_or_create_menu(self, menu_bar: QMenuBar, title: str) -> QMenu:
         """
@@ -432,6 +621,22 @@ class UpdateUIManager(QObject):
             if self._update_dialog:
                 self._update_dialog.close()
                 self._update_dialog = None
+
+            # 关闭手点检查的忙等对话框
+            self._safe_close_manual_dialog()
+
+            # 标记手点检查为已取消，丢弃后续线程回调
+            self._manual_check_cancelled = True
+
+            # 手点检查线程：声明式中断，不强制 wait，避免退出阻塞
+            if (
+                self._manual_check_thread is not None
+                and self._manual_check_thread.isRunning()
+            ):
+                try:
+                    self._manual_check_thread.requestInterruption()
+                except Exception as e:
+                    logger.debug(f"中断手点检查线程异常（静默）: {e}")
 
             # 清理菜单项
             self._cleanup_menu_items()

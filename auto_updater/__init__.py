@@ -64,34 +64,41 @@ class AutoUpdater:
         :param force_check: 是否强制检查（忽略时间间隔）
         :param is_silent: 是否静默模式（不返回间隔错误信息，用于启动检查）
         :return: (是否有更新, 远程版本, 本地版本, 错误信息)
+
+        Note:
+            修复：以前仅在网络请求成功后才写入 last_check_time，
+            导致网络失败时时间戳一直为空，每次启动都重新发起检查。
+            现改为：任何"真实发起检查"的路径（包括失败/异常）都更新时间戳，
+            避免反复打扰用户；仅"间隔未到提前返回"分支不写。
         """
-        try:
-            local_version = self.config.current_version
+        local_version = self.config.current_version
 
-            # 开发环境下的调试信息
-            if is_development_environment():
-                print(f"[开发环境] 开始检查更新，本地版本: {local_version}")
-                if force_check:
-                    print("[开发环境] 强制检查模式")
+        # 开发环境下的调试信息
+        if is_development_environment():
+            print(f"[开发环境] 开始检查更新，本地版本: {local_version}")
+            if force_check:
+                print("[开发环境] 强制检查模式")
+            if is_silent:
+                print("[开发环境] 静默模式")
+
+        # 间隔判定：未到间隔直接返回，不写时间戳
+        if not force_check:
+            should_check, reason = self.config.should_check_for_updates()
+            if not should_check:
+                if is_development_environment():
+                    # 开发环境下不应该到达这里，因为should_check_for_updates总是返回True
+                    # 这只是保险措施
+                    print("[开发环境] 意外触发了时间间隔检查")
+                    return False, None, local_version, "开发环境检查限制"
+                # 静默模式下不返回间隔错误信息
                 if is_silent:
-                    print("[开发环境] 静默模式")
+                    return False, None, local_version, None
+                return False, None, local_version, (
+                    f"距离上次检查时间过短（间隔{self.config.update_check_interval_days}天）"
+                )
 
-            # 检查是否应该进行更新检查
-            if not force_check:
-                should_check, reason = self.config.should_check_for_updates()
-                if not should_check:
-                    if is_development_environment():
-                        # 开发环境下不应该到达这里，因为should_check_for_updates总是返回True
-                        # 这只是保险措施
-                        print("[开发环境] 意外触发了时间间隔检查")
-                        return False, None, local_version, "开发环境检查限制"
-                    else:
-                        # 静默模式下不返回间隔错误信息
-                        if is_silent:
-                            return False, None, local_version, None
-                        else:
-                            return False, None, local_version, f"距离上次检查时间过短（间隔{self.config.update_check_interval_days}天）"
-
+        # 真正发起检查的路径：用 try/finally 保证失败也写时间戳
+        try:
             # 获取远程版本信息
             release_info = self.github_client.get_latest_release()
             if not release_info:
@@ -104,14 +111,19 @@ class AutoUpdater:
             # 检查是否有更新
             has_update = self.config.is_newer_version(remote_version, local_version)
 
-            # 更新最后检查时间
-            self.config.update_last_check_time()
-
             return has_update, remote_version, local_version, None
 
         except Exception as e:
-            local_version = self.config.current_version
             return False, None, local_version, f"检查更新失败: {str(e)}"
+
+        finally:
+            # 无论成功/失败/异常，只要真的发起了检查就记录时间戳
+            # 这样网络不通时也不会每次启动反复重试
+            try:
+                self.config.update_last_check_time()
+            except Exception as ts_err:
+                import logging
+                logging.getLogger(__name__).debug(f"写入 last_check_time 失败（忽略）: {ts_err}")
 
     def download_update(self, version: str, progress_callback=None) -> tuple:
         """
@@ -349,6 +361,7 @@ try:
         UpdateProgressDialog,
         AboutDialog,
         UpdateThread,
+        UpdateCheckThread,
         UpdateStatusWidget,
         UpdateUIText,
         UpdateUIStyle,
@@ -376,6 +389,7 @@ __all__ = [
     'UpdateProgressDialog',
     'AboutDialog',
     'UpdateThread',
+    'UpdateCheckThread',
     'UpdateStatusWidget',
 
     # 资源和配置

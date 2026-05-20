@@ -38,6 +38,7 @@ from .ui_manager import UpdateUIManager
 from .dialogs import UpdateProgressDialog, AboutDialog, UpdateThread
 from .widgets import UpdateStatusWidget
 from .resources import UpdateUIText, UpdateUIStyle, UpdateUIConfig
+from .async_check_thread import UpdateCheckThread
 
 # 版本信息
 __version__ = "1.0.0"
@@ -50,6 +51,7 @@ __all__ = [
     'UpdateProgressDialog',
     'AboutDialog',
     'UpdateThread',
+    'UpdateCheckThread',
     'UpdateStatusWidget',
 
     # 资源和配置
