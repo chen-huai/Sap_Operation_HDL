@@ -260,6 +260,17 @@ class ConfigMixin:
             self.lineEdit_12.setText(loginMsgList[2])
             self.lineEdit_13.setText(loginMsgList[3])
             self.lineEdit_14.setText(loginMsgList[4])
+            # 每小时成本
+            self.doubleSpinBox_5.setValue(float(format(float(configContent['CS_Hourly_Rate']), '.2f')))
+            self.doubleSpinBox_6.setValue(float(format(float(configContent['CHM_Hourly_Rate']), '.2f')))
+            self.doubleSpinBox_8.setValue(float(format(float(configContent['PHY_Hourly_Rate']), '.2f')))
+            # 成本中心
+            self.checkBox_13.setChecked(int(configContent['CS_Selected']))
+            self.checkBox_14.setChecked(int(configContent['CHM_Selected']))
+            self.checkBox_15.setChecked(int(configContent['PHY_Selected']))
+            self.lineEdit_18.setText(configContent['CS_Cost_Center'])
+            self.lineEdit_19.setText(configContent['CHM_Cost_Center'])
+            self.lineEdit_20.setText(configContent['PHY_Cost_Center'])
             # DATA A选择
             self.lineEdit_21.setText(configContent['Data_A_E1'])
             self.lineEdit_22.setText(configContent['Data_A_Z2'])
@@ -354,6 +365,9 @@ class ConfigMixin:
         # 并通过 SapOrderMixin._apply_order_row_to_gui 回填到 GUI 控件，无需在此重复读取。
         guiData['cost'] = float(self.doubleSpinBox_3.text())
         guiData['amountVat'] = float(self.doubleSpinBox_4.text())
+        guiData['csHourlyRate'] = float(self.doubleSpinBox_5.text())
+        guiData['chmHourlyRate'] = float(self.doubleSpinBox_6.text())
+        guiData['phyHourlyRate'] = float(self.doubleSpinBox_8.text())
         guiData['shortText'] = self.lineEdit_5.text()
         guiData['dataAE1'] = self.lineEdit_21.text().split(';')
         guiData['dataAZ2'] = self.lineEdit_22.text().split(';')
@@ -367,6 +381,9 @@ class ConfigMixin:
         guiData['distributionChannels'] = self.lineEdit_12.text()
         guiData['salesOffice'] = self.lineEdit_13.text()
         guiData['salesGroup'] = self.lineEdit_14.text()
+        guiData['csCostCenter'] = self.lineEdit_18.text()
+        guiData['chmCostCenter'] = self.lineEdit_19.text()
+        guiData['phyCostCenter'] = self.lineEdit_20.text()
         if self.checkBox.isChecked():
             guiData['va01Check'] = True
         else:
@@ -401,6 +418,21 @@ class ConfigMixin:
             guiData['planCostCheck'] = True
         else:
             guiData['planCostCheck'] = False
+
+        if self.checkBox_13.isChecked():
+            guiData['csCheck'] = True
+        else:
+            guiData['csCheck'] = False
+
+        if self.checkBox_14.isChecked():
+            guiData['chmCheck'] = True
+        else:
+            guiData['chmCheck'] = False
+
+        if self.checkBox_15.isChecked():
+            guiData['phyCheck'] = True
+        else:
+            guiData['phyCheck'] = False
 
         if self.checkBox_16.isChecked():
             guiData['everyCheck'] = True
