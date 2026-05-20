@@ -141,9 +141,9 @@ class SapOrderMixin:
             sales_office=self.lineEdit_13.text(),
             sales_group=self.lineEdit_14.text(),
             # TODO 业务和成本中心，可能可以删除
-            sub_cost_center_cs=self.lineEdit_18.text(),
-            sub_cost_center_chm=self.lineEdit_19.text(),
-            sub_cost_center_phy=self.lineEdit_20.text(),
+            sub_cost_center_cs='',
+            sub_cost_center_chm='',
+            sub_cost_center_phy='',
             # cs和sales
             cs_code=configContent.get(cs_name, ''),
             sales_code=configContent.get(sales_name, ''),
@@ -654,18 +654,6 @@ class SapOrderMixin:
                 self.textBrowser.append('----------------------------------')
                 QApplication.processEvents()
 
-                if index < len(order_df) - 1 and self.checkBox_5.isChecked():
-                    reply = QMessageBox.question(
-                        self,
-                        '信息',
-                        '是否继续填写下一个Order',
-                        QMessageBox.Yes | QMessageBox.No,
-                        QMessageBox.Yes,
-                    )
-                    if reply != QMessageBox.Yes:
-                        break
-
-            self.lineEdit_9.setText(log_data_path)
             self.textBrowser.append("订单数据已处理完成")
             self.textBrowser.append("log数据:%s" % log_data_path)
             self.textBrowser.append('----------------------------------')

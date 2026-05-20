@@ -100,10 +100,9 @@ class ConfigMixin:
         self.__class__.csItem(self)
         self.__class__.salesItem(self)
         self.__class__.getDefaultInformation(self)
-        self.__class__.getInvoiceMsg(self)
 
         try:
-            self.textBrowser_2.append("配置获取成功")
+            self.textBrowser.append("配置获取成功")
         except AttributeError:
             QMessageBox.information(self, "提示信息", "已获取配置文件内容", QMessageBox.Yes)
         else:
@@ -233,7 +232,7 @@ class ConfigMixin:
         config = np.array(configContent)
         df = pd.DataFrame(config)
         df.to_csv('%s/config_sap_HDL.csv' % configFileUrl, index=0, header=0, encoding='utf_8_sig')
-        self.textBrowser_2.append("配置文件创建成功")
+        self.textBrowser.append("配置文件创建成功")
         QMessageBox.information(self, "提示信息",
                                 "默认配置文件已经创建好，\n如需修改请在用户桌面查找config文件夹中config_sap_HDL.csv，\n将相应的文件内容替换成用户需求即可，修改后记得重新导入配置文件。",
                                 QMessageBox.Yes)
@@ -254,13 +253,6 @@ class ConfigMixin:
     def getDefaultInformation(self):
         # 默认登录界面信息
         try:
-            # data处理
-            self.checkBox_17.setChecked(int(configContent['Row Check']))
-            self.checkBox_18.setChecked(int(configContent['Column Check']))
-            self.lineEdit_23.setText(configContent['Row Data'])
-            self.lineEdit_24.setText(configContent['Column Data'])
-            self.lineEdit_15.setText(configContent['Combine Key'])
-            self.lineEdit_16.setText(configContent['Combine Key'])
             # login信息
             loginMsgList = configContent['Login_msg'].split('-')
             self.lineEdit_10.setText(loginMsgList[0])
@@ -268,28 +260,9 @@ class ConfigMixin:
             self.lineEdit_12.setText(loginMsgList[2])
             self.lineEdit_13.setText(loginMsgList[3])
             self.lineEdit_14.setText(loginMsgList[4])
-            # 每小时成本
-            self.doubleSpinBox_5.setValue(float(format(float(configContent['CS_Hourly_Rate']), '.2f')))
-            self.doubleSpinBox_6.setValue(float(format(float(configContent['CHM_Hourly_Rate']), '.2f')))
-            self.doubleSpinBox_8.setValue(float(format(float(configContent['PHY_Hourly_Rate']), '.2f')))
-            # 成本中心
-            self.checkBox_13.setChecked(int(configContent['CS_Selected']))
-            self.checkBox_14.setChecked(int(configContent['CHM_Selected']))
-            self.checkBox_15.setChecked(int(configContent['PHY_Selected']))
-            self.lineEdit_18.setText(configContent['CS_Cost_Center'])
-            self.lineEdit_19.setText(configContent['CHM_Cost_Center'])
-            self.lineEdit_20.setText(configContent['PHY_Cost_Center'])
-            # 计划成本
-            self.doubleSpinBox_7.setValue(float(format(float(configContent['Plan_Cost_Parameter']), '.2f')))
-            self.spinBox_5.setValue(int(configContent['Significant_Digits']))
-            # 实验室分配比例
-            self.doubleSpinBox_9.setValue(float(format(float(configContent['CHM_Cost_Parameter']), '.2f')))
-            self.doubleSpinBox_10.setValue(float(format(float(configContent['PHY_Cost_Parameter']), '.2f')))
             # DATA A选择
             self.lineEdit_21.setText(configContent['Data_A_E1'])
             self.lineEdit_22.setText(configContent['Data_A_Z2'])
-            # COST是否含税
-            self.checkBox_27.setChecked(int(configContent['Cost_VAT_Selected']))
             # SAP操作
             self.checkBox.setChecked(int(configContent['NVA01_Selected']))
             self.checkBox_2.setChecked(int(configContent['NVA02_Selected']))
@@ -340,15 +313,15 @@ class ConfigMixin:
             self.lineEdit_28.setText(configContent['Lab_1'])
             self.lineEdit_29.setText(configContent['Lab_2'])
         except Exception as msg:
-            self.textBrowser_2.append("错误信息：%s" % msg)
-            self.textBrowser_2.append('----------------------------------')
+            self.textBrowser.append("错误信息：%s" % msg)
+            self.textBrowser.append('----------------------------------')
             QApplication.processEvents()
             reply = QMessageBox.question(self, '信息', '错误信息：%s。\n是否要重新创建配置文件' % msg, QMessageBox.Yes | QMessageBox.No,
                                          QMessageBox.Yes)
             if reply == QMessageBox.Yes:
                 self.__class__.createConfigContent(self)
                 self.textBrowser.append("创建并导入配置成功")
-                self.textBrowser_2.append('----------------------------------')
+                self.textBrowser.append('----------------------------------')
                 QApplication.processEvents()
     def csItem(self):
         self.comboBox_2.clear()
@@ -379,19 +352,9 @@ class ConfigMixin:
         # 订单级字段（sapNo/projectNo/currencyType/exchangeRate/globalPartnerCode/
         # csName/csCode/salesName/salesCode/amount）已由 odmDataToSap 从 Excel 读取，
         # 并通过 SapOrderMixin._apply_order_row_to_gui 回填到 GUI 控件，无需在此重复读取。
-        if self.checkBox_27.isChecked():
-            guiData['cost'] = float(self.doubleSpinBox_3.text())/1.06
-        else:
-            guiData['cost'] = float(self.doubleSpinBox_3.text())
+        guiData['cost'] = float(self.doubleSpinBox_3.text())
         guiData['amountVat'] = float(self.doubleSpinBox_4.text())
-        guiData['csHourlyRate'] = float(self.doubleSpinBox_5.text())
-        guiData['chmHourlyRate'] = float(self.doubleSpinBox_6.text())
-        guiData['phyHourlyRate'] = float(self.doubleSpinBox_8.text())
         guiData['shortText'] = self.lineEdit_5.text()
-        guiData['planCostRate'] = float(self.doubleSpinBox_7.text())
-        guiData['significantDigits'] = int(self.spinBox_5.text())
-        guiData['chmCostRate'] = float(self.doubleSpinBox_9.text())
-        guiData['phyCostRate'] = float(self.doubleSpinBox_10.text())
         guiData['dataAE1'] = self.lineEdit_21.text().split(';')
         guiData['dataAZ2'] = self.lineEdit_22.text().split(';')
         guiData['invoiceStsrtNum'] = int(self.spinBox.text())
@@ -404,9 +367,6 @@ class ConfigMixin:
         guiData['distributionChannels'] = self.lineEdit_12.text()
         guiData['salesOffice'] = self.lineEdit_13.text()
         guiData['salesGroup'] = self.lineEdit_14.text()
-        guiData['csCostCenter'] = self.lineEdit_18.text()
-        guiData['chmCostCenter'] = self.lineEdit_19.text()
-        guiData['phyCostCenter'] = self.lineEdit_20.text()
         if self.checkBox.isChecked():
             guiData['va01Check'] = True
         else:
@@ -442,35 +402,10 @@ class ConfigMixin:
         else:
             guiData['planCostCheck'] = False
 
-        if self.checkBox_13.isChecked():
-            guiData['csCheck'] = True
-        else:
-            guiData['csCheck'] = False
-
-        if self.checkBox_14.isChecked():
-            guiData['chmCheck'] = True
-        else:
-            guiData['chmCheck'] = False
-
-        if self.checkBox_15.isChecked():
-            guiData['phyCheck'] = True
-        else:
-            guiData['phyCheck'] = False
-
         if self.checkBox_16.isChecked():
             guiData['everyCheck'] = True
         else:
             guiData['everyCheck'] = False
-
-        if self.checkBox_17.isChecked():
-            guiData['rowCheck'] = True
-        else:
-            guiData['rowCheck'] = False
-
-        if self.checkBox_18.isChecked():
-            guiData['columnCheck'] = True
-        else:
-            guiData['columnCheck'] = False
 
         if self.checkBox_19.isChecked():
             guiData['contactCheck'] = True

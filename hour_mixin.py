@@ -44,7 +44,6 @@ class HourMixin:
             position.setText(fileUrl)
             QApplication.processEvents()
         else:
-            self.textBrowser_2.append("请重新选择ODM文件")
             QMessageBox.information(self, "提示信息", "请重新选择ODM文件", QMessageBox.Yes)
     def get_hour_combine_file(self):
         fileUrl = self.lineEdit_30.text()
