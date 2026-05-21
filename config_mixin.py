@@ -122,20 +122,8 @@ class ConfigMixin:
              'N:\\XM Softlines\\6. Personel\\5. Personal\\Supporting Team\\收样\\3.Sap\\ODM Data - XM\\2.特殊开票',
              '特殊开票文件路径'],
             ['Invoice_File_Name', '特殊开票要求2022.xlsx', '特殊开票文件名称'],
-            ['Data数据处理', '内容', '备注'],
-            ['Row Data', 'Client Contact Name', '以;分隔，横向添加数据'],
-            ['Column Data', 'Project No.;Currency;Amount with VAT;Reference No.', '以;分隔，纵向添加数据'],
-            ['Row Check', 0, '是否默认被选中,1选中，0未选中'],
-            ['Column Check', 0, '是否默认被选中,1选中，0未选中'],
-            ['Combine Key', "CS;Sales;Currency;Material Code;Invoices' name (Chinese);Buyer(GPC);Month;Exchange Rate",
-             '以;分隔，数据透视字段'],
             ['SAP登入信息', '内容', '备注'],
             ['Login_msg', 'DR-0486-01->601-240', '订单类型-销售组织-分销渠道-销售办事处-销售组'],
-            ['Business_Department', 'CS', '业务部门,名称会用于后续'],
-            ['Lab_1', 'PHY', '代表实验室，会用于后续'],
-            ['Lab_2', 'CHM', '代表实验室，会用于后续'],
-            ['T20', 'PHY', '代表实验室，会用于后续'],
-            ['T75', 'CHM', '代表实验室，会用于后续'],
             ['Hourly Rate', '金额', '备注'],
             ['CS_Hourly_Rate', 300, '客服时薪'],
             ['PHY_Hourly_Rate', 300, '物理时薪'],
@@ -147,34 +135,6 @@ class ConfigMixin:
             ['CS_Cost_Center', '48601240', 'CS成本中心'],
             ['CHM_Cost_Center', '48601293', 'CHM成本中心'],
             ['PHY_Cost_Center', '48601294', 'PHY成本中心'],
-            ['计划成本', '数值', '备注'],
-            ['Plan_Cost_Parameter', 0.9, '实际的90%，预留10%利润'],
-            ['Significant_Digits', 2, '保留几位小数'],
-            ['实验室成本比例', '数值', '备注'],
-            ['CHM_Cost_Parameter', 0.3, '给到CHM30%'],
-            ['PHY_Cost_Parameter', 0.3, '给到PHY30%'],
-            # 新增分配规则参数
-            ['405_Item_1000', 0.5, '405分配规则'],
-            ['405_Item_2000', 0.5, '405分配规则'],
-            ['441_Item_1000', 0.8, '441分配规则'],
-            ['441_Item_2000', 0.2, '441分配规则'],
-            ['430_Item_1000', 0.8, '430分配规则'],
-            ['430_Item_2000', 0.2, '430分配规则'],
-            # 新增特殊MC规则
-            ['T20-430-A2', 'PHY_1000/CHM_2000', '1000/2000对应的lab，强制1000设置在前，2000在后'],
-            ['T20-430-A2_mc', 'T20-430-00/T75-430-00', '1000/2000对应的mc'],
-            ['T75-441-A2', 'CHM_1000/PHY_2000', '1000/2000对应的lab，强制1000设置在前，2000在后'],
-            ['T75-441-A2_mc', 'T75-441-00/T20-441-00', '1000/2000对应的mc'],
-            ['T75-405-A2', 'CHM_1000/PHY_2000', '1000/2000对应的lab，强制1000设置在前，2000在后'],
-            ['T75-405-A2_mc', 'T75-405-00/T20-405-00', '1000/2000对应的mc'],
-            ['T75-405-D2', 'CHM_1000/PHY_2000', '1000/2000对应的lab，计算hour后强制都转为1000'],
-            ['T75-405-D2_mc', 'T75-405-D2/T75-405-D2', '1000/2000对应的mc'],
-            ['T75-405-D3', 'CHM_1000/PHY_2000', '1000/2000对应的lab，计算hour后强制都转为1000'],
-            ['T75-405-D3_mc', 'T75-405-D3/T75-405-D3', '1000/2000对应的mc'],
-            ['T75-441-D2', 'CHM_1000/PHY_2000', '1000/2000对应的lab，计算hour后强制都转为1000'],
-            ['T75-441-D2_mc', 'T75-441-D2/T75-441-D2', '1000/2000对应的mc'],
-            ['T75-441-D3', 'CHM_1000/PHY_2000', '1000/2000对应的lab，计算hour后强制都转为1000'],
-            ['T75-441-D3_mc', 'T75-441-D3/T75-441-D3', '1000/2000对应的mc'],
             # 新增公共参数
             ['Max_Hour', 8, '最大工作时长'],
             ['Hours_Combine_Key', "Order Number;Material Code;Primary CS",'以;分隔，数据透视字段'],
@@ -182,16 +142,15 @@ class ConfigMixin:
             ['Hour_Files_Export_URL', "N:\\XM Softlines\\6. Personel\\5. Personal\\Supporting Team\\2.财务\\2.SAP\\1.ODM Data - XM\\3.Hours",'Invoice文件导入路径'],
             ['Hour_Field_Mapping', "{'staff_id': 'staff_id','week': 'week','order_no': 'order_no','allocated_hours': 'allocated_hours','office_time':'office_time','material_code': 'material_code','item': 'item','allocated_day': 'allocated_day','staff_name': 'staff_name'}", '对应字段映射'],
             ['DATA A数据填写', '判断依据', '备注'],
-            ['Data_A_E1', '5010815347;5010427355;5010913488;5010685589;5010829635;5010817524', 'Data A录E1,新添加用;隔开即可'],
-            ['Data_A_Z2', '5010908478;5010823259', 'Data A录Z2,新添加用;隔开即可'],
+            ['Data_A_E1', '5010815347;5010427355;5010913488;5010685589;5010829635;5010817524', 'Data A录E1（国内电商）,新添加用;隔开即可'],
+            ['Data_A_Z2', '5010908478;5010823259', 'Data A录Z2（海外电商）,新添加用;隔开即可'],
             ['SAP操作', '内容', '备注'],
-            ['Cost_VAT_Selected', 1, '是否默认被选中,1选中，0未选中'],
             ['NVA01_Selected', 1, '是否默认被选中,1选中，0未选中'],
             ['NVA02_Selected', 1, '是否默认被选中,1选中，0未选中'],
             ['NVF01_Selected', 0, '是否默认被选中,1选中，0未选中'],
             ['NVF03_Selected', 0, '是否默认被选中,1选中，0未选中'],
             ['DataB_Selected', 1, '是否默认被选中,1选中，0未选中'],
-            ['Plan_Cost_Selected', 25, '每月超过几号自动选中（不包含）'],
+            ['Plan_Cost_Selected', 1, '是否默认被选中,1选中，0未选中'],
             ['Save_Selected', 1, '是否默认被选中,1选中，0未选中'],
             ['Every_Selected', 1, '是否默认被选中,1选中，0未选中'],
             ['Contact_Selected', 0, '是否默认被选中,1选中，0未选中'],
@@ -226,8 +185,8 @@ class ConfigMixin:
             ['Ele_Invoice_Files_Export_URL', 'N:\\XM Softlines\\1. Project\\3. Finance\\02. WIP\\全电发票 2023\\10',
              '全电发票导出路径'],
             ['名称', '编号', '角色'],
-            ['chen, frank', '6375108', 'CS'],
-            ['chen, frank', '6375108', 'Sales'],
+            ['chen, frank', '6375', 'CS'],
+            ['chen, frank', '6375', 'Sales'],
         ]
         config = np.array(configContent)
         df = pd.DataFrame(config)
@@ -283,8 +242,7 @@ class ConfigMixin:
             self.checkBox_6.setChecked(int(configContent['Save_Selected']))
             self.checkBox_16.setChecked(int(configContent['Every_Selected']))
             self.checkBox_19.setChecked(int(configContent['Contact_Selected']))
-            if int(configContent['Plan_Cost_Selected']) < int(today.split('.')[-1]):
-                self.checkBox_8.setChecked(True)
+            self.checkBox_8.setChecked(int(configContent['Plan_Cost_Selected']))
             # admin操作
             self.checkBox_25.setChecked(int(configContent['Add_CS_Msg_Selected']))
             self.checkBox_9.setChecked(int(configContent['Invoice_No_Selected']))
