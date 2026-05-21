@@ -11,11 +11,11 @@ APP_EXECUTABLE: str = "Sap_Operate_HDL.exe"
 
 # GitHub仓库配置
 GITHUB_OWNER: str = "chen-huai"
-GITHUB_REPO: str = "Sap_Operate_HDL"
+GITHUB_REPO: str = "Sap_Operation_HDL"
 GITHUB_API_BASE: str = "https://api.github.com"
 
 # 版本配置
-CURRENT_VERSION: str = "1.0.0"
+CURRENT_VERSION: str = "1.0.1"
 UPDATE_CHECK_INTERVAL_DAYS: int = 30
 AUTO_CHECK_ENABLED: bool = True
 

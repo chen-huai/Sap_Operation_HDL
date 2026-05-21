@@ -83,8 +83,8 @@ class UpdateUIText:
     RELEASE_NOTES_MESSAGE = "版本"
 
     # GitHub
-    GITHUB_LINK_TEXT = "GitHub: chen-huai/Temu_PDF_Rename_APP"
-    GITHUB_URL = "https://github.com/chen-huai/Temu_PDF_Rename_APP"
+    GITHUB_LINK_TEXT = "GitHub: chen-huai/Sap_Operation_HDL"
+    GITHUB_URL = "https://github.com/chen-huai/Sap_Operation_HDL"
     OPEN_GITHUB_ERROR_MESSAGE = "无法打开GitHub页面"
 
     # 重启

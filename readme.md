@@ -10,7 +10,7 @@
 
 ### 安装指南
 1. 克隆项目：
-`git clone https://github.com/chen-huai/Sap_Operation.git`
+`git clone https://github.com/chen-huai/Sap_Operation_HDL.git`
 2. 安装依赖库：
 `pip install -r requirements.txt`
 3. 运行主程序：
@@ -247,7 +247,7 @@ This project aims to provide a solution for automatically operating SAP to creat
 
 ### Installation Guide
 1. Clone the project:
-`git clone https://github.com/chen-huai/Sap_Operation.git`
+`git clone https://github.com/chen-huai/Sap_Operation_HDL.git`
 2. Install dependencies:
 `pip install -r requirements.txt`
 3. Run the main program: Simply run the main program Sap_Operate_HDL.py.
