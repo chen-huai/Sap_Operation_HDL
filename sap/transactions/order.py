@@ -257,7 +257,7 @@ class OrderTransaction:
                 self.session.set_text(
                     f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
                     f"tblSAPMV45AKOSTENSAETZE/txtTABD-FESTPREIS[5,{row}]",
-                    entry.amount,
+                    format(float(entry.amount), ".2f"),
                 )
         except Exception as exc:
             return SapResult.fail(f"Data B未填写，{exc}", step="lab_cost")
@@ -479,8 +479,13 @@ class OrderTransaction:
 
     @staticmethod
     def _parse_amount(amount_text: str) -> float:
-        """Parse SAP amount text."""
-        return float(amount_text.replace(",", ""))
+        """Parse SAP amount text. 空串/非法值统一回退 0.0，避免 SAP 把 0.00 condition 清空回读后触发崩溃。"""
+        if not amount_text or not amount_text.strip():
+            return 0.0
+        try:
+            return float(amount_text.replace(",", ""))
+        except (TypeError, ValueError):
+            return 0.0
 
     @staticmethod
     def _format_amount(amount: float) -> str:

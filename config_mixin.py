@@ -118,10 +118,6 @@ class ConfigMixin:
             ['特殊开票', '内容', '备注'],
             ['SAP_Date_URL', 'N:\\XM Softlines\\6. Personel\\5. Personal\\Supporting Team\\收样\\3.Sap\\ODM Data - XM',
              '文件数据路径'],
-            ['Invoice_File_URL',
-             'N:\\XM Softlines\\6. Personel\\5. Personal\\Supporting Team\\收样\\3.Sap\\ODM Data - XM\\2.特殊开票',
-             '特殊开票文件路径'],
-            ['Invoice_File_Name', '特殊开票要求2022.xlsx', '特殊开票文件名称'],
             ['SAP登入信息', '内容', '备注'],
             ['Login_msg', 'DR-0486-01->601-240', '订单类型-销售组织-分销渠道-销售办事处-销售组'],
             ['Hourly Rate', '金额', '备注'],
@@ -319,13 +315,8 @@ class ConfigMixin:
     def getGuiData(self):
         guiData = {}
         # 订单级字段（sapNo/projectNo/currencyType/exchangeRate/globalPartnerCode/
-        # csName/csCode/salesName/salesCode/amount）已由 odmDataToSap 从 Excel 读取，
-        # 并通过 SapOrderMixin._apply_order_row_to_gui 回填到 GUI 控件，无需在此重复读取。
-        guiData['cost'] = float(self.doubleSpinBox_3.text())
-        guiData['amountVat'] = float(self.doubleSpinBox_4.text())
-        guiData['csHourlyRate'] = float(self.doubleSpinBox_5.text())
-        guiData['chmHourlyRate'] = float(self.doubleSpinBox_6.text())
-        guiData['phyHourlyRate'] = float(self.doubleSpinBox_8.text())
+        # csName/csCode/salesName/salesCode/amount/cost/amountVat/各时薪）已由 odmDataToSap
+        # 从 Excel 读取，并通过 SapOrderMixin._apply_order_row_to_gui 回填到 GUI 控件，无需在此重复读取。
         guiData['shortText'] = self.lineEdit_5.text()
         guiData['dataAE1'] = self.lineEdit_21.text().split(';')
         guiData['dataAZ2'] = self.lineEdit_22.text().split(';')
