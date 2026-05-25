@@ -236,19 +236,26 @@ class OrderTransaction:
                 item_no = raw_item.split(";", 1)[0].strip() if raw_item else ""
                 if not performer_cost_center and not rate_cost_center:
                     continue
-                # Data B 页签中同一行需要同时写执行部门、费率成本中心、item 号和固定价格。
+                # Data B 页签中同一行需要同时写执行部门、ZULEISTENDE/KOSTENSAETZE 双表 item 号、费率成本中心和固定价格。
                 self.session.set_text(
                     f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
                     f"tblSAPMV45AZULEISTENDE/ctxtTABL-KOSTL[0,{row}]",
                     performer_cost_center,
                 )
+                if item_no and order.sales_group != '240':
+                    # ZULEISTENDE 表格 item 号写入；缺失和 sales_group 为 240 时跳过，由 SAP 默认行为兜底。
+                    self.session.set_text(
+                        f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
+                        f"tblSAPMV45AZULEISTENDE/txtTABL-ZPOSITION[1,{row}]",
+                        item_no,
+                    )
                 self.session.set_text(
                     f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
                     f"tblSAPMV45AKOSTENSAETZE/ctxtTABD-KOSTL[0,{row}]",
                     rate_cost_center,
                 )
                 if item_no and order.sales_group != '240':
-                    # 新增 item 号写入；缺失和sales_group为240时跳过，由 SAP 默认行为兜底。
+                    # KOSTENSAETZE 表格 item 号写入；缺失和 sales_group 为 240 时跳过，由 SAP 默认行为兜底。
                     self.session.set_text(
                         f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
                         f"tblSAPMV45AKOSTENSAETZE/txtTABD-POSNR[1,{row}]",
