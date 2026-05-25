@@ -154,13 +154,9 @@ class RevenueAllocator:
             act_revenue = float(revenueData['Revenue'])
 
         untaxed_cost = float(revenueData['Total Subcon Cost']) / 1.06
-        base = (act_revenue - untaxed_cost) * float(
-            configContent.get('Plan_Cost_Parameter'))
+        base = act_revenue - untaxed_cost
         material_code = revenueData.get('Material Code', '')
         primary_cs = revenueData.get('Primary CS', '')  # 获取Primary CS字段
-
-        # 获取有效位数配置
-        significant_digits = int(configContent.get('Significant_Digits', 0))
 
         result = {
             'business_dept_1000_revenue': 0, 'lab_1000_revenue': 0, 'business_dept_1000_hours': 0, 'lab_1000_hours': 0,
@@ -189,8 +185,8 @@ class RevenueAllocator:
             business_dept_1000_act_revenue = round((act_revenue - untaxed_cost) * (1 - lab_cost), 2)
             lab_1000_revenue = round(base * lab_cost, 2)
             lab_1000_act_revenue = round((act_revenue - untaxed_cost) * lab_cost, 2)
-            business_dept_1000_hours = round((base * (1 - lab_cost)) / business_dept_rate, significant_digits)
-            lab_1000_hours = round((base * lab_cost) / lab_rate, significant_digits)
+            business_dept_1000_hours = round((base * (1 - lab_cost)) / business_dept_rate, 0)
+            lab_1000_hours = round((base * lab_cost) / lab_rate, 0)
 
             result.update({
                 'item_1000_amount': amount,
@@ -237,12 +233,10 @@ class RevenueAllocator:
             business_dept_2000_act_revenue = round((act_revenue - untaxed_cost) * proportion_2000 * (1 - lab_2000_cost), 2)
             lab_2000_revenue = round(base * proportion_2000 * lab_2000_cost, 2)
             lab_2000_act_revenue = round((act_revenue - untaxed_cost) * proportion_2000 * lab_2000_cost, 2)
-            business_dept_1000_hours = round((base * proportion_1000 * (1 - lab_1000_cost)) / business_dept_rate,
-                                             significant_digits)
-            lab_1000_hours = round((base * proportion_1000 * lab_1000_cost) / lab_1000_rate, significant_digits)
-            business_dept_2000_hours = round((base * proportion_2000 * (1 - lab_2000_cost)) / business_dept_rate,
-                                             significant_digits)
-            lab_2000_hours = round((base * proportion_2000 * lab_2000_cost) / lab_2000_rate, significant_digits)
+            business_dept_1000_hours = round((base * proportion_1000 * (1 - lab_1000_cost)) / business_dept_rate, 0)
+            lab_1000_hours = round((base * proportion_1000 * lab_1000_cost) / lab_1000_rate, 0)
+            business_dept_2000_hours = round((base * proportion_2000 * (1 - lab_2000_cost)) / business_dept_rate, 0)
+            lab_2000_hours = round((base * proportion_2000 * lab_2000_cost) / lab_2000_rate, 0)
 
             result.update({
                 'item_1000_amount': item_1000_amount,
@@ -275,8 +269,8 @@ class RevenueAllocator:
                     'item': '1000',
                     'dept': business_dept,
                     'dept_revenue': round(result['business_dept_1000_revenue'], 2),
-                    'dept_hours': round(result['business_dept_1000_hours'], significant_digits),
-                    'original_hours': round(result['business_dept_1000_hours'], significant_digits),
+                    'dept_hours': round(result['business_dept_1000_hours'], 0),
+                    'original_hours': round(result['business_dept_1000_hours'], 0),
                     'primary_cs': result['primary_cs']  # 添加Primary CS字段
                 },
                 {  # 1000实验室
@@ -285,8 +279,8 @@ class RevenueAllocator:
                     'item': '1000',
                     'dept': result['lab_1000'],
                     'dept_revenue': round(result['lab_1000_revenue'], 2),
-                    'dept_hours': round(result['lab_1000_hours'], significant_digits),
-                    'original_hours': round(result['lab_1000_hours'], significant_digits),
+                    'dept_hours': round(result['lab_1000_hours'], 0),
+                    'original_hours': round(result['lab_1000_hours'], 0),
                     'primary_cs': result['primary_cs']  # 添加Primary CS字段
                 },
                 {  # 2000业务部门
@@ -295,8 +289,8 @@ class RevenueAllocator:
                     'item': '2000',
                     'dept': business_dept,
                     'dept_revenue': round(result['business_dept_2000_revenue'], 2),
-                    'dept_hours': round(result['business_dept_2000_hours'], significant_digits),
-                    'original_hours': round(result['business_dept_2000_hours'], significant_digits),
+                    'dept_hours': round(result['business_dept_2000_hours'], 0),
+                    'original_hours': round(result['business_dept_2000_hours'], 0),
                     'primary_cs': result['primary_cs']  # 添加Primary CS字段
                 },
                 {  # 2000实验室
@@ -305,8 +299,8 @@ class RevenueAllocator:
                     'item': '2000',
                     'dept': result['lab_2000'],
                     'dept_revenue': round(result['lab_2000_revenue'], 2),
-                    'dept_hours': round(result['lab_2000_hours'], significant_digits),
-                    'original_hours': round(result['lab_2000_hours'], significant_digits),
+                    'dept_hours': round(result['lab_2000_hours'], 0),
+                    'original_hours': round(result['lab_2000_hours'], 0),
                     'primary_cs': result['primary_cs']  # 添加Primary CS字段
                 }
             ]
@@ -399,9 +393,6 @@ class RevenueAllocator:
         :param staff_dict: 部门人员字典 {部门: [员工编号1, 员工编号2...]}
         :return: 分配后的工时记录列表
         """
-        # 获取有效位数配置
-        significant_digits = int(configContent.get('Significant_Digits', 0))
-
         # 加载现有工时数据
         self._load_hours_data(start_date, configContent.get('Hour_Files_Export_URL'))
 
@@ -490,7 +481,7 @@ class RevenueAllocator:
                             new_record.update({
                                 'allocated_date': work_day,
                                 'allocated_day': work_day.day,
-                                'allocated_hours': round(record_hours, significant_digits),
+                                'allocated_hours': round(record_hours, 0),
                                 'staff_name': primary_cs,
                                 'staff_id': configContent.get(primary_cs),
                                 'week': self._get_week_number(work_day)
@@ -584,7 +575,7 @@ class RevenueAllocator:
                         new_record.update({
                             'allocated_date': work_day,
                             'allocated_day': work_day.day,
-                            'allocated_hours': round(record_hours, significant_digits),
+                            'allocated_hours': round(record_hours, 0),
                             'staff_name': staff_name,
                             'staff_id': configContent.get(staff_name),
                             'week': current_week
@@ -623,7 +614,7 @@ class RevenueAllocator:
                                 'dept': dept,
                                 'material_code': record['material_code'],
                                 'item': record['item'],
-                                'remaining_hours': round(record['dept_hours'], significant_digits),
+                                'remaining_hours': round(record['dept_hours'], 0),
                                 'original_hours': record['original_hours'],
                                 'check_date': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             })
@@ -638,9 +629,6 @@ class RevenueAllocator:
         按人员平均分配工时 - 分配小时数以员工为推进单位，分配日期以分配记录为推进单位，避免死循环，未分配工时记录，分配后同步更新dept_hours
         """
         try:
-            # 获取有效位数配置
-            significant_digits = int(configContent.get('Significant_Digits', 0))
-
             # 加载现有工时数据
             self._load_hours_data(start_date, configContent.get('Hour_Files_Export_URL'))
 
@@ -754,7 +742,7 @@ class RevenueAllocator:
                                     'dept': dept,
                                     'material_code': record['material_code'],
                                     'item': record['item'],
-                                    'remaining_hours': round(record['dept_hours'], significant_digits),
+                                    'remaining_hours': round(record['dept_hours'], 0),
                                     'original_hours': record['original_hours'],
                                     'check_date': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 })
@@ -832,7 +820,7 @@ class RevenueAllocator:
                     new_record.update({
                         'allocated_date': work_day,
                         'allocated_day': work_day.day,
-                        'allocated_hours': round(can_allocate, significant_digits),
+                        'allocated_hours': round(can_allocate, 0),
                         'staff_name': staff_name,
                         'staff_id': configContent.get(staff_name),
                         'week': self._get_week_number(work_day)
@@ -857,7 +845,7 @@ class RevenueAllocator:
                                     'dept': dept,
                                     'material_code': record['material_code'],
                                     'item': record['item'],
-                                    'remaining_hours': round(record['dept_hours'], significant_digits),
+                                    'remaining_hours': round(record['dept_hours'], 0),
                                     'original_hours': record['original_hours'],
                                     'check_date': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 })
@@ -873,7 +861,7 @@ class RevenueAllocator:
                             'dept': dept,
                             'material_code': record['material_code'],
                             'item': record['item'],
-                            'remaining_hours': round(record['dept_hours'], significant_digits),
+                            'remaining_hours': round(record['dept_hours'], 0),
                             'original_hours': record['original_hours'],
                             'check_date': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         })
@@ -938,9 +926,8 @@ class RevenueAllocator:
 #                      'Lab_1': 'PHY', 'Lab_2': 'CHM', 'T20': 'PHY', 'T75': 'CHM', 'Hourly Rate': '金额',
 #                      'CS_Hourly_Rate': '300', 'PHY_Hourly_Rate': '300', 'CHM_Hourly_Rate': '300', '成本中心': '编号',
 #                      'CS_Selected': '1', 'PHY_Selected': '1', 'CHM_Selected': '1', 'CS_Cost_Center': '48601240',
-#                      'CHM_Cost_Center': '48601293', 'PHY_Cost_Center': '48601294', '计划成本': '数值',
-#                      'Plan_Cost_Parameter': '0.9', 'Significant_Digits': '0', '实验室成本比例': '数值',
-#                      'CHM_Cost_Parameter': '0.3', 'PHY_Cost_Parameter': '0.3', '405_Item_1000': '0.5',
+#                      'CHM_Cost_Center': '48601293', 'PHY_Cost_Center': '48601294', '实验室成本比例': '数值',
+#                      '405_Item_1000': '0.5',
 #                      '405_Item_2000': '0.5', '441_Item_1000': '0.8', '441_Item_2000': '0.2', '430_Item_1000': '0.8',
 #                      '430_Item_2000': '0.2', 'T20-430-A2': 'PHY_1000/CHM_2000',
 #                      'T20-430-A2_mc': 'T20-430-00/T75-430-00', 'T75-441-A2': 'CHM_1000/PHY_2000',

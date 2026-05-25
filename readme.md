@@ -66,16 +66,6 @@
 
 #### 1. 基础计算参数设置
 
-**计划成本参数**：
-```python
-Plan_Cost_Parameter = 0.9  # 实际收入的90%，预留10%利润
-```
-
-**有效位数设置**：
-```python
-Significant_Digits = 2  # 保留2位有效数字
-```
-
 **业务部门设置**：
 ```python
 Business_Department = "CS"  # 默认业务部门
@@ -91,12 +81,6 @@ T20 = "PHY"        # T20项目对应物理实验室
 T75 = "CHM"        # T75项目对应化学实验室
 ```
 
-**实验室成本比例**：
-```python
-CHM_Cost_Parameter = 0.3  # 化学实验室获得30%的收入
-PHY_Cost_Parameter = 0.3  # 物理实验室获得30%的收入
-```
-
 **实验室工时率（每年更新）**：
 ```python
 CS_Hourly_Rate = 329.14    # CS部门每小时费率
@@ -108,7 +92,7 @@ PHY_Hourly_Rate = 334.75   # 物理实验室每小时费率
 
 **基础收入计算公式**：
 ```python
-base = (float(revenueData['Revenue']) - float(revenueData['Total Subcon Cost']) / 1.06) * float(configContent.get('Plan_Cost_Parameter'))
+base = float(revenueData['Revenue']) - float(revenueData['Total Subcon Cost']) / 1.06
 ```
 
 **分配策略**：
