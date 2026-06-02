@@ -114,6 +114,7 @@ class OrderTransaction:
 
             self._fill_partners(order, options)
             self._fill_header_text(order)
+            self._fill_submission_if_needed(order)
 
             # DATA A / DATA B 是订单头上的两组业务字段。
             self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\13")
@@ -197,6 +198,19 @@ class OrderTransaction:
         self.session.set_key(lang_id, "EN")
         self.session.focus(lang_id)
         self.session.send_vkey(0)
+
+    def _fill_submission_if_needed(self, order: OrderData) -> None:
+        """404 Power driven Furniture 订单需要在 Additional data B 写入 submission 标识。"""
+        if order.product_sub_category != "404 Power driven Furniture":
+            return
+
+        submission_id = (
+            "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\11/"
+            "ssubSUBSCREEN_BODY:SAPMV45A:4351/txtVBAK-SUBMI"
+        )
+        self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\11")
+        self.session.set_text(submission_id, "EF")
+        self.session.focus(submission_id, 2)
 
     def fill_lab_cost_entries(
         self,

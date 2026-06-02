@@ -68,6 +68,8 @@ class OrderData:
     exchange_rate: float
     # 订单头短文本。
     short_text: str
+    # 产品子类别，用于少数 VA01 头部字段的条件写入。
+    product_sub_category: str = ""
     # 全球合作伙伴代码。
     global_partner_code: str = ""
     # 销售名称，当前主要用来判断是否需要补销售伙伴。

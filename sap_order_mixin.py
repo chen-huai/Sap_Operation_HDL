@@ -152,6 +152,23 @@ class SapOrderMixin:
             data_az2=self.lineEdit_22.text().split(';'),
         )
 
+    def _resolve_sales_group(self, order_row) -> str:
+        """解析 VA01 销售组，避免把 Cost Center 的非数字尾缀误写入 VKGRP。"""
+        configured_sales_group = self.lineEdit_14.text().strip()
+        cost_center = self._excel_str(order_row.get('Cost Center'))
+        derived_sales_group = cost_center[-3:] if len(cost_center) >= 3 else ''
+
+        if derived_sales_group.isdigit():
+            return derived_sales_group
+
+        if derived_sales_group:
+            self.textBrowser.append(
+                "<font color='orange'>Cost Center [%s] 不能解析出销售组，使用配置 Sales Group [%s]</font>"
+                % (cost_center, configured_sales_group)
+            )
+            QApplication.processEvents()
+        return configured_sales_group
+
     def _build_order_from_dataframes(self, order_row, item_df):
         """从订单头和 item 表构建 SAP 订单对象。
 
@@ -183,9 +200,10 @@ class SapOrderMixin:
             currency_type=self._excel_str(order_row.get('Currency')),
             exchange_rate=self._excel_float(order_row.get('Rate'), 1.0),
             short_text=self._excel_str(order_row.get('售达方的文本')),
+            product_sub_category=self._excel_str(order_row.get('Product Sub-Category')),
             global_partner_code=self._excel_str(order_row.get('GPC Code')),
             sales_name=self._excel_str(order_row.get('Sales')),
-            sales_group=self._excel_str(order_row.get('Cost Center'))[-3:],
+            sales_group=self._resolve_sales_group(order_row),
             ecd=self._excel_date_dot(order_row.get('Ecd')),
             order_cost_center=self._excel_str(order_row.get('Order Center')),
             items=items,
