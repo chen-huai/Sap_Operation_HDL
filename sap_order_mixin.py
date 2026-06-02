@@ -479,8 +479,10 @@ class SapOrderMixin:
                 QApplication.processEvents()
 
                 remarks = []
-                # 业务流程：VA01(可选) → Save VA01 → 打开 VA02(可选) → Add Item → Data B(可选) → Plan Cost(可选) → Save VA02
-                # 所有步骤独立可选；跳过 VA01 时 order_no 取自 Excel 的 Order Number 列（已在校验前读取）。
+                # 业务流程：VA01(可选) -> Save VA01 -> 打开 VA02 -> Add Item
+                # -> Plan Cost(可选) -> Save VA02 -> 打开 VA02 -> Data B(可选) -> Save VA02。
+                # Save 复选框控制常规保存；但本次新增 item 后再做 Data B 时，会先强制保存 item，
+                # 因为 Data B 依赖已落盘的 SAP item 号（1000/2000 等）。
                 sap_amount_vat = ''
 
                 def _report_step(step_name, step_result):
@@ -516,6 +518,8 @@ class SapOrderMixin:
                 need_save_va01 = va01_done and (
                     flow_options.get('saveCheck')
                     or flow_options.get('va02Check')
+                    or flow_options.get('labCostCheck')
+                    or flow_options.get('planCostCheck')
                 )
                 if need_save_va01:
                     save_va01_result = service.save('VA01')
@@ -564,28 +568,22 @@ class SapOrderMixin:
                         QApplication.processEvents()
 
                     if open_result.success:
+                        first_va02_changed = False
+                        item_added = False
+                        item_failed = False
+                        pre_data_b_save_ok = True
                         # add item 仅在 va02Check 时进行；纯 Data B / Plan Cost 场景不重复加 item。
                         if flow_options.get('va02Check'):
                             item_result = service.add_items(order, revenue)
                             order_no = item_result.order_no or order_no
                             remarks.append(f"Item:{item_result.message}" if item_result.message else "Item")
                             sap_amount_vat = item_result.sap_amount_vat or sap_amount_vat
+                            item_added = item_result.success
+                            item_failed = not item_result.success
+                            first_va02_changed = first_va02_changed or item_result.success
                             _report_step('Add Item', item_result)
 
-                        if flow_options.get('labCostCheck') and data_b_entries:
-                            # items 加和换算 CNY，传给 service 用于判断是否回填订单价值字段。
-                            items_revenue_total_cny = items_revenue_total * (order.exchange_rate or 1.0)
-                            data_b_result = service.fill_lab_cost_entries(
-                                data_b_entries,
-                                order,
-                                auftragswert_cny=items_revenue_total_cny,
-                            )
-                            remarks.append(
-                                f"Data B:{data_b_result.message}" if data_b_result.message else "Data B"
-                            )
-                            _report_step('Data B', data_b_result)
-
-                        if flow_options.get('planCostCheck'):
+                        if flow_options.get('planCostCheck') and not item_failed:
                             # 按 order.items 顺序（即 SAP 物理 row 顺序）调度 plan cost，
                             # 避免字典插入顺序（来自 sub 表出现顺序）与 SAP 行号顺序不一致；
                             # sub 表未提供 plan cost 数据的 item 直接跳过。
@@ -596,6 +594,7 @@ class SapOrderMixin:
                                 plan_result = service.apply_plan_cost_entries(
                                     plan_cost_entries, focus_row=row
                                 )
+                                first_va02_changed = first_va02_changed or plan_result.success
                                 remarks.append(
                                     f"Plan Cost {item.item}:{plan_result.message}"
                                     if plan_result.message
@@ -603,14 +602,67 @@ class SapOrderMixin:
                                 )
                                 _report_step('Plan Cost %s' % item.item, plan_result)
 
-                        if flow_options.get('saveCheck'):
-                            save_va02_result = service.save('VA02')
-                            remarks.append(
-                                f"Save VA02:{save_va02_result.message}"
-                                if save_va02_result.message
-                                else "Save VA02"
+                        need_data_b = flow_options.get('labCostCheck') and data_b_entries
+                        # Data B 的 item 依赖已保存的 SAP item 号（1000/2000 等）。
+                        # 如果本次新增了 item，即使未勾选 Save，也要先保存再重新打开 VA02 写 Data B。
+                        need_save_before_data_b = bool(need_data_b and item_added)
+                        need_first_va02_save = first_va02_changed and (
+                            flow_options.get('saveCheck') or need_save_before_data_b
+                        )
+                        if need_first_va02_save:
+                            save_step_name = (
+                                'Save VA02 Before Data B'
+                                if need_save_before_data_b
+                                else 'Save VA02'
                             )
-                            _report_step('Save VA02', save_va02_result)
+                            save_va02_result = service.save('VA02')
+                            pre_data_b_save_ok = save_va02_result.success
+                            remarks.append(
+                                f"{save_step_name}:{save_va02_result.message}"
+                                if save_va02_result.message
+                                else save_step_name
+                            )
+                            _report_step(save_step_name, save_va02_result)
+
+                        if need_data_b and item_failed:
+                            self.textBrowser.append(
+                                "<font color='red'>Add Item 失败，跳过当前订单的 Data B 步骤</font>"
+                            )
+                            QApplication.processEvents()
+
+                        if need_data_b and not item_failed and pre_data_b_save_ok:
+                            reopen_result = SapResult()
+                            if first_va02_changed and need_first_va02_save:
+                                reopen_result = service.open_order(order_no)
+                                order_no = reopen_result.order_no or order_no or self._extract_order_no(sap_session)
+                                remarks.append(
+                                    f"VA02 Data B:{reopen_result.message}"
+                                    if reopen_result.message
+                                    else "VA02 Data B"
+                                )
+                                _report_step('Open VA02 Data B', reopen_result)
+
+                            if reopen_result.success:
+                                # items 加和换算 CNY，传给 service 用于判断是否回填订单价值字段。
+                                items_revenue_total_cny = items_revenue_total * (order.exchange_rate or 1.0)
+                                data_b_result = service.fill_lab_cost_entries(
+                                    data_b_entries,
+                                    order,
+                                    auftragswert_cny=items_revenue_total_cny,
+                                )
+                                remarks.append(
+                                    f"Data B:{data_b_result.message}" if data_b_result.message else "Data B"
+                                )
+                                _report_step('Data B', data_b_result)
+
+                                if flow_options.get('saveCheck'):
+                                    save_data_b_result = service.save('VA02')
+                                    remarks.append(
+                                        f"Save VA02 Data B:{save_data_b_result.message}"
+                                        if save_data_b_result.message
+                                        else "Save VA02 Data B"
+                                    )
+                                    _report_step('Save VA02 Data B', save_data_b_result)
 
                     # VA02 段结束后再做一次最终兜底，覆盖中间步骤未回传 order_no 的边界情况。
                     if not order_no:
