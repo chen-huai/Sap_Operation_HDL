@@ -15,7 +15,7 @@ GITHUB_REPO: str = "Sap_Operation_HDL"
 GITHUB_API_BASE: str = "https://api.github.com"
 
 # 版本配置
-CURRENT_VERSION: str = "1.0.2"
+CURRENT_VERSION: str = "1.0.3"
 UPDATE_CHECK_INTERVAL_DAYS: int = 30
 AUTO_CHECK_ENABLED: bool = True
 

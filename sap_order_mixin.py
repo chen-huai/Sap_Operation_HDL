@@ -79,6 +79,16 @@ class SapOrderMixin:
             return default
         return ts.strftime('%Y.%m.%d')
 
+    @staticmethod
+    def _is_date_before_today(date_text: str) -> bool:
+        """判断 YYYY.MM.DD 日期是否早于今天；空值或非法日期不在这里拦截。"""
+        if not date_text:
+            return False
+        ts = pd.to_datetime(date_text, errors='coerce')
+        if pd.isna(ts):
+            return False
+        return ts.date() < pd.Timestamp.today().date()
+
     def _filter_related_rows(self, dataframe, order_row):
         """按 Combine Id 严格筛选当前订单对应的明细行；调用前需确保 Combine Id 存在。"""
         if dataframe.empty:
@@ -476,6 +486,19 @@ class SapOrderMixin:
                     log_file.to_excel(log_data_path, merge_cells=False, index=False)
                     self.textBrowser.append(
                         "<font color='red'>No.%s %s</font>" % (index + 1, missing_msg)
+                    )
+                    QApplication.processEvents()
+                    continue
+
+                if need_va01_check and self._is_date_before_today(order.ecd):
+                    ecd_msg = (
+                        "VA01创建失败：ECD %s 早于今天，不能早于订单创建日期"
+                        % order.ecd
+                    )
+                    log_file.loc[index, 'Remark'] = ecd_msg
+                    log_file.to_excel(log_data_path, merge_cells=False, index=False)
+                    self.textBrowser.append(
+                        "<font color='red'>No.%s %s</font>" % (index + 1, ecd_msg)
                     )
                     QApplication.processEvents()
                     continue
