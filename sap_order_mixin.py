@@ -160,6 +160,8 @@ class SapOrderMixin:
             # 客户选择是否为海外订单
             data_ae1=self.lineEdit_21.text().split(';'),
             data_az2=self.lineEdit_22.text().split(';'),
+            # TUV IC 订单清单：无 GUI 控件，直接读 config（命中则 VA01 写 IC_TRANSAKTION=O1）。
+            data_b_tuv=str(configContent.get('Data_B_TUV', '')).split(';'),
         )
 
     def _resolve_sales_group(self, order_row) -> str:

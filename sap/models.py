@@ -28,6 +28,9 @@ class SapConfig:
     data_ae1: list[str] = field(default_factory=list)
     data_az2: list[str] = field(default_factory=list)
 
+    # DATA B TUV IC 订单判定用的客户清单（命中则 VA01 写 IC_TRANSAKTION=O1）。
+    data_b_tuv: list[str] = field(default_factory=list)
+
     # 阈值控制。
     revenue_threshold: float = 35000.0
     plan_cost_min_threshold: float = 1000.0

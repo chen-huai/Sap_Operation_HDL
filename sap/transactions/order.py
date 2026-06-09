@@ -16,7 +16,11 @@ from sap.models import (
     SapConfig,
     SapResult,
 )
-from sap.rules import resolve_data_a_key, should_fill_auftragswert
+from sap.rules import (
+    resolve_data_a_key,
+    should_fill_auftragswert,
+    should_fill_ic_transaction,
+)
 from sap.session import SapSession
 
 
@@ -140,6 +144,13 @@ class OrderTransaction:
                 "ssubSUBSCREEN_BODY:SAPMV45A:4312/ctxtZAUFTD-VORAUS_AUFENDE",
                 order.ecd,
             )
+            # 命中 Data_B_TUV（TUV IC 订单）时写入 IC 交易类型 O1。
+            if should_fill_ic_transaction(order, self.config):
+                self.session.set_text(
+                    "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/"
+                    "ssubSUBSCREEN_BODY:SAPMV45A:4312/ctxtZAUFTD-IC_TRANSAKTION",
+                    "O1",
+                )
             if should_fill_auftragswert(revenue, self.config):
                 self.session.set_text(
                     "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/"
