@@ -27,6 +27,11 @@ from auto_updater.config_constants import CURRENT_VERSION
 from auto_updater import AutoUpdater, UI_AVAILABLE
 from sap import CostOptions, OrderData, OrderService, PartnerOptions, RevenueData, SapConfig, SapSession
 
+# 配置结构版本号：每次修改 createConfigContent 默认配置（新增/删除项、调整段结构）后 +1，
+# 老用户启动时若桌面文件版本落后，会自动执行一次智能合并迁移（保留自定义值与人员名单）。
+CONFIG_VERSION = 2
+
+
 def _publish_runtime_globals(source):
     for name in (
         'configFileUrl', 'desktopUrl', 'now', 'last_time', 'today',
@@ -69,6 +74,8 @@ class ConfigMixin:
             else:
                 exit()
         else:
+            # 桌面配置已存在：先按版本号自动迁移（补齐新增项、保留自定义），再读取。
+            self.migrateConfigIfNeeded()
             self.__class__.getConfigContent(self)
     def getConfigContent(self):
         # 配置文件
@@ -107,14 +114,10 @@ class ConfigMixin:
             QMessageBox.information(self, "提示信息", "已获取配置文件内容", QMessageBox.Yes)
         else:
             pass
-    def createConfigContent(self):
-        global monthAbbrev
-        months = "JanFebMarAprMayJunJulAugSepOctNovDec"
-        n = time.strftime('%m')
-        pos = (int(n) - 1) * 3
-        monthAbbrev = months[pos:pos + 3]
-
-        configContent = [
+    def _default_config_rows(self):
+        """返回默认配置二维行列表（含版本号行），供创建/导出/合并迁移复用。"""
+        return [
+            ['Config_Version', CONFIG_VERSION, '配置结构版本号,升级时自动递增,请勿手动修改'],
             ['特殊开票', '内容', '备注'],
             ['SAP_Date_URL', 'N:\\XM Softlines\\6. Personel\\5. Personal\\Supporting Team\\收样\\3.Sap\\ODM Data - XM',
              '文件数据路径'],
@@ -137,9 +140,10 @@ class ConfigMixin:
             ['Hour_Files_Import_URL', "N:\\XM Softlines\\6. Personel\\5. Personal\\Supporting Team\\2.财务\\2.SAP\\1.ODM Data - XM\\3.Hours",'Invoice文件导入路径'],
             ['Hour_Files_Export_URL', "N:\\XM Softlines\\6. Personel\\5. Personal\\Supporting Team\\2.财务\\2.SAP\\1.ODM Data - XM\\3.Hours",'Invoice文件导入路径'],
             ['Hour_Field_Mapping', "{'staff_id': 'staff_id','week': 'week','order_no': 'order_no','allocated_hours': 'allocated_hours','office_time':'office_time','material_code': 'material_code','item': 'item','allocated_day': 'allocated_day','staff_name': 'staff_name'}", '对应字段映射'],
-            ['DATA A数据填写', '判断依据', '备注'],
+            ['DATA A/B数据填写', '判断依据', '备注'],
             ['Data_A_E1', '5010815347;5010427355;5010913488;5010685589;5010829635;5010817524', 'Data A录E1（国内电商）,新添加用;隔开即可'],
             ['Data_A_Z2', '5010908478;5010823259', 'Data A录Z2（海外电商）,新添加用;隔开即可'],
+            ['Data_B_TUV', '910000074;9000220;9000350;9000490;9002140;9002460;9000210;9001530;9001881;9001800;9000130;9001910;9002390;9001800;9001580;9002120;9000790;5910000133;5910000040;5910000100;5010704027;9000040;9000070;9000580;9000790;9000910;9002050;9002560;9001580;09000210;5910000595', 'Data B录TUV IC订单,新添加用;隔开即可'],
             ['SAP操作', '内容', '备注'],
             ['NVA01_Selected', 1, '是否默认被选中,1选中，0未选中'],
             ['NVA02_Selected', 1, '是否默认被选中,1选中，0未选中'],
@@ -184,13 +188,112 @@ class ConfigMixin:
             ['chen, frank', '6375', 'CS'],
             ['chen, frank', '6375', 'Sales'],
         ]
-        config = np.array(configContent)
+
+    def createConfigContent(self):
+        global monthAbbrev
+        months = "JanFebMarAprMayJunJulAugSepOctNovDec"
+        n = time.strftime('%m')
+        pos = (int(n) - 1) * 3
+        monthAbbrev = months[pos:pos + 3]
+
+        configContent = self._default_config_rows()
+        config = np.array(configContent, dtype=object)
         df = pd.DataFrame(config)
         df.to_csv('%s/config_sap_HDL.csv' % configFileUrl, index=0, header=0, encoding='utf_8_sig')
         self.textBrowser.append("配置文件创建成功")
         QMessageBox.information(self, "提示信息",
                                 "默认配置文件已经创建好，\n如需修改请在用户桌面查找config文件夹中config_sap_HDL.csv，\n将相应的文件内容替换成用户需求即可，修改后记得重新导入配置文件。",
                                 QMessageBox.Yes)
+
+    @staticmethod
+    def _is_person_anchor(row):
+        """判断是否为人员名单段锚点行（'名称','编号','角色'）。"""
+        return len(row) >= 2 and str(row[0]).strip() == '名称' and str(row[1]).strip() == '编号'
+
+    def _merge_config_rows(self, old_df):
+        """以代码默认结构为基准合并旧配置。
+
+        - KV 配置段：补齐新增项/更新段结构，但每个 key 的值用旧文件旧值覆盖（保留自定义）；
+          Config_Version 除外，强制使用代码新版本。
+        - 人员名单段（'名称/编号/角色' 及之后）：整段保留旧文件内容（动态名单，不可覆盖）。
+        """
+        default_rows = self._default_config_rows()
+
+        # 旧文件 KV 值映射：name -> value（仅取首次出现，人员段重复 name 不影响 KV 合并）。
+        old_values = {}
+        for _, r in old_df.iterrows():
+            key = r['A']
+            if pd.isna(key):
+                continue
+            old_values.setdefault(str(key), r['B'])
+
+        # 默认结构里人员名单锚点位置；找不到则视为整表都是 KV 段。
+        person_idx = next(
+            (i for i, row in enumerate(default_rows) if self._is_person_anchor(row)),
+            len(default_rows),
+        )
+
+        merged = []
+        for row in default_rows[:person_idx]:
+            new_row = list(row)
+            key = str(new_row[0])
+            if key != 'Config_Version' and key in old_values and not pd.isna(old_values[key]):
+                new_row[1] = old_values[key]
+            merged.append(new_row)
+
+        # 人员名单段整段保留旧文件；旧文件无锚点（异常）时回退默认人员段。
+        old_rows = old_df.values.tolist()
+        old_person_idx = next(
+            (i for i, row in enumerate(old_rows) if self._is_person_anchor(row)),
+            None,
+        )
+        if old_person_idx is not None:
+            for row in old_rows[old_person_idx:]:
+                merged.append(['' if pd.isna(c) else c for c in row])
+        else:
+            merged.extend(list(row) for row in default_rows[person_idx:])
+
+        return merged
+
+    def migrateConfigIfNeeded(self):
+        """版本号驱动的配置自动迁移。
+
+        桌面配置版本落后于代码 CONFIG_VERSION 时，备份原文件并执行智能合并写回；
+        失败时沿用原配置不阻断启动。
+        """
+        config_path = '%s/config_sap_HDL.csv' % configFileUrl
+        try:
+            old_df = pd.read_csv(config_path, names=['A', 'B', 'C'])
+        except Exception as exc:
+            self.textBrowser.append("<font color='orange'>配置版本检查跳过：%s</font>" % exc)
+            return
+
+        # 旧版本号：无 Config_Version 行的老配置视为 0。
+        old_version = 0
+        version_rows = old_df[old_df['A'] == 'Config_Version']
+        if not version_rows.empty:
+            try:
+                old_version = int(float(version_rows.iloc[0]['B']))
+            except (TypeError, ValueError):
+                old_version = 0
+
+        if old_version >= CONFIG_VERSION:
+            return
+
+        try:
+            shutil.copyfile(config_path, '%s.bak' % config_path)
+            merged_rows = self._merge_config_rows(old_df)
+            df = pd.DataFrame(np.array(merged_rows, dtype=object))
+            df.to_csv(config_path, index=0, header=0, encoding='utf_8_sig')
+            self.textBrowser.append(
+                "配置已从 v%s 升级到 v%s（已保留自定义设置与人员名单，备份: config_sap_HDL.csv.bak）"
+                % (old_version, CONFIG_VERSION)
+            )
+        except Exception as exc:
+            self.textBrowser.append(
+                "<font color='red'>配置自动升级失败，沿用原配置：%s</font>" % exc
+            )
+
     def exportConfig(self):
         # 重新导出默认配置文件
         reply = QMessageBox.question(self, '信息', '确认是否要创建默认配置文件', QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
