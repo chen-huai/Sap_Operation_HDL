@@ -121,8 +121,8 @@ class OrderEditTransaction:
             self.session.press("wnd[0]/usr/subSUBSCREEN_HEADER:SAPMV45A:4021/btnBT_HEAD")
 
             self._edit_currency(order, diffs)
-            self._edit_short_text(order, diffs)
             self._edit_partners(order, diffs)
+            self._edit_short_text(order, diffs)
             self._edit_submission(order, diffs)
         except Exception as exc:
             return SapResult.fail(f"抬头编辑失败，{exc}", step="edit_header")
@@ -181,6 +181,17 @@ class OrderEditTransaction:
         except SapUiError:
             return False
 
+    def _dismiss_popups(self, max_rounds: int = 3) -> None:
+        """连续回车关闭残留的 wnd[1] 确认弹窗，直到无弹窗或达上限。
+
+        SAP 改字段后可能弹出链式确认框（如重新定价提示），残留的模态弹窗会让
+        后续 wnd[0] 操作（select_tab 等）抛错并被 edit_header 的 try 吞掉，导致
+        "后面方法全不触发"。这里兜底逐个关闭。
+        """
+        for _ in range(max_rounds):
+            if not self.session.try_send_vkey(0, window_id="wnd[1]"):
+                return
+
     def _edit_currency(self, order: OrderData, diffs: list[str]) -> None:
         """对比币种与汇率（T\\01）。"""
         self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\01")
@@ -191,7 +202,7 @@ class OrderEditTransaction:
         if self._compare_and_set(currency_id, order.currency_type, field="币种", diffs=diffs):
             self.session.focus(currency_id, 3)
             self.session.send_vkey(0)
-            self.session.try_send_vkey(0, window_id="wnd[1]")
+            self._dismiss_popups()
 
         if order.currency_type != "CNY":
             rate_id = (
@@ -201,6 +212,10 @@ class OrderEditTransaction:
             if self._compare_and_set(rate_id, order.exchange_rate, field="汇率", diffs=diffs):
                 self.session.focus(rate_id, 8)
                 self.session.send_vkey(0)
+                self._dismiss_popups()
+
+        # 兜底：币种/汇率改动后若仍残留确认弹窗，逐个关闭，避免阻塞后续抬头字段编辑。
+        self._dismiss_popups()
 
     def _edit_short_text(self, order: OrderData, diffs: list[str]) -> None:
         """对比售达方文本（抬头短文本，T\\10）。"""
@@ -211,6 +226,9 @@ class OrderEditTransaction:
         )
         self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\10")
         if self._compare_and_set(text_id, order.short_text, field="售达方文本", diffs=diffs):
+            # 文本本体已由 _compare_and_set 写入；以下语言设置为"尽力而为"。
+            # 注意：set_key 设 .key 抛的是原始 COM 异常（非 SapUiError），
+            # 这里须用 Exception 兜底，否则语言设置失败会让整个抬头编辑被判失败。
             try:
                 self.session.set_selection_indexes(text_id, 11, 11)
                 lang_id = (
@@ -220,7 +238,7 @@ class OrderEditTransaction:
                 self.session.set_key(lang_id, "EN")
                 self.session.focus(lang_id)
                 self.session.send_vkey(0)
-            except SapUiError:
+            except Exception:
                 pass
 
     def _edit_partners(self, order: OrderData, diffs: list[str]) -> None:
@@ -236,37 +254,51 @@ class OrderEditTransaction:
             "SAPLV09C:1000/tblSAPLV09CGV_TC_PARTNER_OVERVIEW"
         )
 
-        # GPC：定位 ZG 行后对比 partner 编码。
+        # GPC：定位 ZG 行后对比 partner 编码；改动后提交并确认 SAP 校验弹窗。
         gpc_row = self._find_partner_row(partner_prefix, "ZG")
         if gpc_row is not None and order.global_partner_code:
-            self._compare_and_set(
+            self._compare_partner_and_confirm(
                 f"{partner_prefix}/ctxtGVS_TC_DATA-REC-PARTNER[1,{gpc_row}]",
                 order.global_partner_code,
                 field="GPC Code",
                 diffs=diffs,
             )
 
-        # CS：配置映射出的 cs_code 写在"负责雇员/Employee respons."行。
+        # CS：配置映射出的 cs_code 写在"负责雇员/Employee respons."行；改动后提交并确认。
         if self.config.cs_code:
             cs_row = self._find_employee_row(partner_prefix)
             if cs_row is not None:
-                self._compare_and_set(
+                self._compare_partner_and_confirm(
                     f"{partner_prefix}/ctxtGVS_TC_DATA-REC-PARTNER[1,{cs_row}]",
                     self.config.cs_code,
                     field="Primary CS",
                     diffs=diffs,
                 )
 
-        # Sales：VE 行对比 sales_code。
+        # Sales：VE 行对比 sales_code；改动后提交并确认。
         if self.config.sales_code:
             ve_row = self._find_partner_row(partner_prefix, "VE")
             if ve_row is not None:
-                self._compare_and_set(
+                self._compare_partner_and_confirm(
                     f"{partner_prefix}/ctxtGVS_TC_DATA-REC-PARTNER[1,{ve_row}]",
                     self.config.sales_code,
                     field="Sales",
                     diffs=diffs,
                 )
+
+    def _compare_partner_and_confirm(
+        self, element_id: str, new_value, *, field: str, diffs: list[str]
+    ) -> None:
+        """对比并写入伙伴行编码；有差异才提交：聚焦→wnd[0]回车触发校验→关闭确认弹窗。
+
+        伙伴字段用 set_text 写入后不会自动校验，须先在 wnd[0] 回车提交，SAP 才会
+        弹出确认框（wnd[1]），随后回车关闭。无差异则不提交、不回车。
+        """
+        if not self._compare_and_set(element_id, new_value, field=field, diffs=diffs):
+            return
+        self.session.focus(element_id, len(self._norm(new_value)))
+        self.session.send_vkey(0)
+        self._dismiss_popups()
 
     def _find_partner_row(self, partner_prefix: str, parvw_key: str, max_rows: int = 12) -> int | None:
         """扫描伙伴表前 max_rows 行，返回 PARVW 角色 key 命中的首行行号；找不到返回 None。"""
