@@ -17,9 +17,11 @@ from sap.models import (
     RevenueData,
     SapConfig,
     SapResult,
+    SubEditEntry,
 )
 from sap.services.hour_service import HourService
 from sap.services.invoice_service import InvoiceService
+from sap.services.order_edit_service import OrderEditService
 from sap.services.order_service import OrderService
 from sap.session import SapSession
 
@@ -30,6 +32,7 @@ __all__ = [
     "HourService",
     "InvoiceService",
     "OrderData",
+    "OrderEditService",
     "OrderItemData",
     "OrderService",
     "PartnerOptions",
@@ -38,4 +41,5 @@ __all__ = [
     "SapConfig",
     "SapResult",
     "SapSession",
+    "SubEditEntry",
 ]

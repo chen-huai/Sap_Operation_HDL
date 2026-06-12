@@ -172,6 +172,22 @@ class PlanCostEntry:
 
 
 @dataclass(slots=True)
+class SubEditEntry:
+    """VA02 编辑专用：承载 sub 表中创建流程未覆盖的新列。
+
+    - item: 关联 SAP item 号。
+    - sub_site: Sub Site（执行站点），创建流程未写，编辑流程新增。
+    - transfer_price: Sub Site Transfer Price（站点转移价），创建流程未写，编辑流程新增。
+
+    控件 ID 与所属页签待 SAP 录制后校正（见 order_edit.py 中 TODO）。
+    """
+
+    item: str = ""
+    sub_site: str = ""
+    transfer_price: float = 0.0
+
+
+@dataclass(slots=True)
 class HourData:
     """工时记录数据。"""
 

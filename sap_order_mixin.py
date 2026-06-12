@@ -27,6 +27,7 @@ from auto_updater import AutoUpdater, UI_AVAILABLE
 from sap import (
     DataBEntry,
     OrderData,
+    OrderEditService,
     OrderItemData,
     OrderService,
     PartnerOptions,
@@ -35,6 +36,7 @@ from sap import (
     SapConfig,
     SapResult,
     SapSession,
+    SubEditEntry,
 )
 from runtime_globals import configContent
 
@@ -296,6 +298,159 @@ class SapOrderMixin:
 
         return data_b_entries, plan_cost_entries_by_item
 
+    def _build_sub_edit_entries(self, order_row, sub_df):
+        """从 sub 表读取编辑专用新列，构建 SubEditEntry 列表。
+
+        仅承载创建流程未覆盖的 Sub Site / Sub Site Transfer Price；
+        其余 sub 字段仍由 _build_sub_entries_from_dataframe 产出，保持与创建一致口径。
+        """
+        order_sub_df = self._filter_related_rows(sub_df, order_row)
+        entries: list[SubEditEntry] = []
+        for _, sub_row in order_sub_df.iterrows():
+            entries.append(SubEditEntry(
+                item=self._excel_str(sub_row.get('item')),
+                sub_site=self._excel_str(sub_row.get('Sub Site')),
+                transfer_price=self._excel_float(sub_row.get('Sub Site Transfer Price')),
+            ))
+        return entries
+
+    def _edit_order_row(
+        self,
+        index,
+        order_row,
+        order,
+        config,
+        data_b_entries,
+        plan_cost_entries_by_item,
+        sub_edit_entries,
+        order_no,
+        flow_options,
+        sap_session,
+        log_file,
+        log_data_path,
+    ):
+        """编辑分支：进 VA02 对比 Excel 与 SAP 现值，仅更新差异。
+
+        编辑范围沿用现有复选框：header 默认编辑；va02Check→编辑 item；
+        labCostCheck→编辑 Data B；planCostCheck→编辑 Plan Cost。
+        全程收集差异写入 log Remark，操作类型标记 Edit。
+        """
+        def _report_step(step_name, step_result):
+            if step_result.success:
+                suffix = ': %s' % step_result.message if step_result.message else ''
+                self.textBrowser.append('%s 成功%s' % (step_name, suffix))
+            else:
+                message = step_result.message or '未知错误'
+                self.textBrowser.append(
+                    "<font color='red'>%s 失败: %s</font>" % (step_name, message)
+                )
+            QApplication.processEvents()
+
+        combine_id = self._excel_str(order_row.get('Combine Id'))
+        primary_cs = self._excel_str(order_row.get('Primary CS'))
+        sales_name = self._excel_str(order_row.get('Sales'))
+        excel_amount_vat = self._excel_str(order_row.get('Tax-inclusive amount'))
+        items_revenue_total = sum(item.revenue for item in order.items)
+
+        self.textBrowser.append('========== No.%s [编辑] ==========' % (index + 1))
+        self.textBrowser.append("Combine Id: %s" % combine_id)
+        self.textBrowser.append("Order No.: %s" % order_no)
+        self.textBrowser.append("Request Number: %s" % order.project_no)
+        self.textBrowser.append("Primary CS: %s / Sales: %s" % (primary_cs, sales_name))
+        QApplication.processEvents()
+
+        remarks = []
+        sap_amount_vat = ''
+        service = OrderEditService(sap_session, config)
+
+        # 打开 VA02。
+        open_result = service.open_order(order_no)
+        order_no = open_result.order_no or order_no
+        _report_step('Open VA02', open_result)
+        if not open_result.success:
+            remarks.append(f"Open VA02:{open_result.message}")
+            self._write_edit_log(
+                log_file, log_data_path, index, order_no, remarks, sap_amount_vat
+            )
+            return
+
+        # Header 编辑（默认执行）。
+        header_diffs: list[str] = []
+        header_result = service.edit_header(order, header_diffs)
+        remarks.append(f"Header:{header_result.message}" if header_result.message else "Header")
+        _report_step('Header 编辑', header_result)
+
+        # Item 编辑（va02Check）。
+        if flow_options.get('va02Check'):
+            item_diffs: list[str] = []
+            item_result = service.edit_items(order, item_diffs)
+            sap_amount_vat = item_result.sap_amount_vat or sap_amount_vat
+            remarks.append(f"Item:{item_result.message}" if item_result.message else "Item")
+            _report_step('Item 编辑', item_result)
+
+        # Plan Cost 编辑（planCostCheck）：按 order.items 物理 row 顺序调度。
+        if flow_options.get('planCostCheck'):
+            for row, item in enumerate(order.items):
+                plan_cost_entries = plan_cost_entries_by_item.get(item.item)
+                if not plan_cost_entries:
+                    continue
+                pc_diffs: list[str] = []
+                plan_result = service.edit_plan_cost(plan_cost_entries, pc_diffs, focus_row=row)
+                remarks.append(
+                    f"Plan Cost {item.item}:{plan_result.message}"
+                    if plan_result.message else f"Plan Cost {item.item}"
+                )
+                _report_step('Plan Cost %s' % item.item, plan_result)
+
+        # Data B 编辑（labCostCheck）。
+        if flow_options.get('labCostCheck') and data_b_entries:
+            items_revenue_total_cny = items_revenue_total * (order.exchange_rate or 1.0)
+            db_diffs: list[str] = []
+            data_b_result = service.edit_data_b(
+                data_b_entries, sub_edit_entries, order, db_diffs,
+                auftragswert_cny=items_revenue_total_cny,
+            )
+            remarks.append(f"Data B:{data_b_result.message}" if data_b_result.message else "Data B")
+            _report_step('Data B 编辑', data_b_result)
+
+        # 保存（saveCheck）。
+        if flow_options.get('saveCheck'):
+            save_result = service.save('VA02 Edit')
+            remarks.append(f"Save:{save_result.message}" if save_result.message else "Save")
+            _report_step('Save VA02', save_result)
+
+        # 含税金额一致性校验（与创建分支同口径）。
+        try:
+            sap_amount_value = float(str(sap_amount_vat).replace(',', '')) if sap_amount_vat else 0.0
+        except (TypeError, ValueError):
+            sap_amount_value = 0.0
+        try:
+            excel_amount_value = float(str(excel_amount_vat).replace(',', '')) if excel_amount_vat else 0.0
+        except (TypeError, ValueError):
+            excel_amount_value = 0.0
+        amount_diff = round(sap_amount_value - excel_amount_value, 2)
+        if excel_amount_value > 0 and abs(amount_diff) >= 0.01:
+            diff_msg = (
+                f"含税金额不一致: Excel={format(excel_amount_value, ',.2f')} "
+                f"SAP={format(sap_amount_value, ',.2f')} 差额={format(amount_diff, ',.2f')}"
+            )
+            remarks.append(diff_msg)
+            self.textBrowser.append("<font color='red'>%s</font>" % diff_msg)
+
+        self._write_edit_log(log_file, log_data_path, index, order_no, remarks, sap_amount_vat)
+        self.textBrowser.append("Order No.: %s 编辑完成" % order_no)
+        self.textBrowser.append('----------------------------------')
+        QApplication.processEvents()
+
+    def _write_edit_log(self, log_file, log_data_path, index, order_no, remarks, sap_amount_vat):
+        """写编辑结果到 log，操作类型标记 Edit。"""
+        log_file.loc[index, '操作类型'] = 'Edit'
+        log_file.loc[index, 'Order No.'] = order_no
+        log_file.loc[index, 'Remark'] = ';'.join([item for item in remarks if item])
+        log_file.loc[index, 'sapAmountVat'] = sap_amount_vat
+        log_file.loc[index, 'Update Time'] = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+        log_file.to_excel(log_data_path, merge_cells=False, index=False)
+
     @staticmethod
     def _sort_items_for_sap(items):
         """按 SAP VA02 item 概览页 POSNR 升序的物理 row 顺序对 items 排序。
@@ -390,6 +545,7 @@ class SapOrderMixin:
             self.__class__.createFolder(self, log_file_url)
             log_data_path = self.__class__.getFileName(self, log_file_url, 'log', 'xlsx')
             log_file = order_df.copy()
+            log_file['操作类型'] = ''
             log_file['Order No.'] = ''
             log_file['Remark'] = ''
             log_file['Proforma No.'] = ''
@@ -453,6 +609,18 @@ class SapOrderMixin:
                 config = self._build_sap_config_from_order_row(order_row)
                 data_b_entries, plan_cost_entries_by_item = self._build_sub_entries_from_dataframe(order_row, sub_df)
                 service = OrderService(sap_session, config)
+
+                # ===== 编辑分流：Order Number 有值 = 订单已存在，跳过 VA01 创建，进 VA02 对比更新 =====
+                # Excel 会混排"有号=编辑 / 无号=创建"两类行；本分支只接管有号行，无号行落回下方原创建逻辑（行为不变）。
+                excel_order_no = self._excel_str(order_row.get('Order Number'))
+                if excel_order_no:
+                    sub_edit_entries = self._build_sub_edit_entries(order_row, sub_df)
+                    self._edit_order_row(
+                        index, order_row, order, config,
+                        data_b_entries, plan_cost_entries_by_item, sub_edit_entries,
+                        excel_order_no, flow_options, sap_session, log_file, log_data_path,
+                    )
+                    continue
 
                 # 按本次勾选的步骤分级校验：缺啥提示啥，支持只跑 Data B / Plan Cost 的分批验证场景。
                 need_va01_check = flow_options.get('va01Check')
@@ -732,6 +900,7 @@ class SapOrderMixin:
                     )
                     remarks.append(diff_msg)
 
+                log_file.loc[index, '操作类型'] = 'Create'
                 log_file.loc[index, 'Order No.'] = order_no
                 log_file.loc[index, 'Remark'] = ';'.join([item for item in remarks if item])
                 log_file.loc[index, 'Proforma No.'] = ''
