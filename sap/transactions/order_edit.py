@@ -276,6 +276,7 @@ class OrderEditTransaction:
                 )
 
         # Sales：VE 行对比 sales_code；改动后提交并确认。
+        # 销售从无到有时订单原本无 VE 行（创建侧 add_sales_partner 未触发），此时新增一行。
         if self.config.sales_code:
             ve_row = self._find_partner_row(partner_prefix, "VE")
             if ve_row is not None:
@@ -284,6 +285,10 @@ class OrderEditTransaction:
                     self.config.sales_code,
                     field="Sales",
                     diffs=diffs,
+                )
+            else:
+                self._add_partner_row(
+                    partner_prefix, "VE", self.config.sales_code, field="Sales", diffs=diffs
                 )
 
     def _compare_partner_and_confirm(
@@ -321,6 +326,42 @@ class OrderEditTransaction:
             if (text or "").strip() in {"负责雇员", "Employee respons."}:
                 return row
         return None
+
+    def _find_empty_partner_row(self, partner_prefix: str, max_rows: int = 12) -> int | None:
+        """扫描伙伴表，返回首个空行（PARVW 与 PARTNER 均为空）行号；无空行返回 None。
+
+        用于"角色原本不存在需新增"场景（如 Sales 从无到有）。越界(SapUiError)即停。
+        """
+        for row in range(max_rows):
+            try:
+                key = (self.session.find(f"{partner_prefix}/cmbGVS_TC_DATA-REC-PARVW[0,{row}]").key or "").strip()
+                partner = (self.session.read_text(f"{partner_prefix}/ctxtGVS_TC_DATA-REC-PARTNER[1,{row}]") or "").strip()
+            except SapUiError:
+                break
+            if not key and not partner:
+                return row
+        return None
+
+    def _add_partner_row(
+        self, partner_prefix: str, parvw_key: str, partner_value, *, field: str, diffs: list[str]
+    ) -> None:
+        """在伙伴表空行上新增一行：设角色 key + 写编码并提交确认（口径同创建 order.py:189-193）。
+
+        无空行可用时记录待校正、绝不盲写。新增动作记入 diffs（`字段:(空)→新值`）。
+        """
+        value = self._norm(partner_value)
+        if not value:
+            return
+        row = self._find_empty_partner_row(partner_prefix)
+        if row is None:
+            diffs.append(f"{field}:无空行可新增(待校正)")
+            return
+        self.session.set_key(f"{partner_prefix}/cmbGVS_TC_DATA-REC-PARVW[0,{row}]", parvw_key)
+        self.session.set_text(f"{partner_prefix}/ctxtGVS_TC_DATA-REC-PARTNER[1,{row}]", value)
+        self.session.focus(f"{partner_prefix}/ctxtGVS_TC_DATA-REC-PARTNER[1,{row}]", len(value))
+        self.session.send_vkey(0)
+        self._dismiss_popups()
+        diffs.append(f"{field}:(空)→{value}")
 
     def _edit_submission(self, order: OrderData, diffs: list[str]) -> None:
         """对比 Product Sub-Category 驱动的 submission 标识（仅 404 场景，T\\11）。"""
