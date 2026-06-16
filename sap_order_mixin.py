@@ -331,9 +331,9 @@ class SapOrderMixin:
     ):
         """编辑分支：进 VA02 对比 Excel 与 SAP 现值，仅更新差异。
 
-        编辑范围沿用现有复选框：header 默认编辑；va02Check→编辑 item；
-        labCostCheck→编辑 Data B；planCostCheck→编辑 Plan Cost。
-        全程收集差异写入 log Remark，操作类型标记 Edit。
+        编辑范围由流程控制按钮独立门控，四步互不影响：va01Check→编辑 header；
+        va02Check→编辑 item；planCostCheck→编辑 Plan Cost；labCostCheck→编辑 Data B。
+        未勾选的步骤直接跳过。全程收集差异写入 log Remark，操作类型标记 Edit。
         """
         def _report_step(step_name, step_result):
             if step_result.success:
@@ -374,11 +374,12 @@ class SapOrderMixin:
             )
             return
 
-        # Header 编辑（默认执行）。
-        header_diffs: list[str] = []
-        header_result = service.edit_header(order, header_diffs)
-        remarks.append(f"Header:{header_result.message}" if header_result.message else "Header")
-        _report_step('Header 编辑', header_result)
+        # Header 编辑（va01Check）：未勾选 VA01 则跳过，与其余三步同款独立门控。
+        if flow_options.get('va01Check'):
+            header_diffs: list[str] = []
+            header_result = service.edit_header(order, header_diffs)
+            remarks.append(f"Header:{header_result.message}" if header_result.message else "Header")
+            _report_step('Header 编辑', header_result)
 
         # Item 编辑（va02Check）。
         if flow_options.get('va02Check'):
