@@ -378,10 +378,15 @@ class OrderEditTransaction:
     # item 编辑
     # ------------------------------------------------------------------ #
     def edit_items(self, order: OrderData, diffs: list[str]) -> SapResult:
-        """对比并更新 item：命中行改差异，未命中行按创建写法新增。
+        """按 item+物料 双键对比更新 item。
+
+        规则（见 .claude/plan/va02_edit_items_match.md）：
+            - item 与 物料 均一致 → 仅更新金额（绝不改写物料，已落盘行物料只读会报错）；
+            - item 或 物料 有一个不同 → 新增一条；
+            - SAP 有、ODM 表无 → 提示并记 log，不删不改。
 
         Returns:
-            SapResult: message 含 item 差异摘要，sap_amount_vat 含金额加和文本。
+            SapResult: message 含 item 差异/提示摘要，sap_amount_vat 含金额加和文本。
         """
         result = SapResult(step="edit_items")
         try:
@@ -392,28 +397,38 @@ class OrderEditTransaction:
                 result.message = "无 item 数据"
                 return result
 
-            existing = self._read_existing_item_rows()  # {item_no: 物理 row}
+            existing = self._read_existing_item_rows()  # [(物理 row, item_no, material, 金额)]
+            existing_item_nos = {item_no for _, item_no, _, _ in existing if item_no}
+            matched_rows: set[int] = set()
             next_row = len(existing)
             sap_amount_total = 0.0
             sap_amount_text = ""
 
             for item in items:
-                row = existing.get(item.item) if item.item else None
-                if row is None:
-                    # 新增 item：复用创建写法落行 + 写金额/长文本。
-                    self._base._write_item_row(next_row, item)
-                    self.session.send_vkey(0)
-                    amount_text = self._enter_item_and_write_condition(next_row, item, result, diffs, is_new=True)
-                    existing[item.item or f"_new_{next_row}"] = next_row
-                    next_row += 1
+                row = self._match_item_row(existing, item, matched_rows)
+                if row is not None:
+                    # item + 物料 一致 → 进详情逐字段比对金额/长文本，仅差异才写（不碰物料）。
+                    # 长文本(Item Group Description)只能在详情页读写，故命中行一律进详情比对。
+                    matched_rows.add(row)
+                    amount_text, summary = self._enter_item_and_write_condition(row, item, result, is_new=False)
                 else:
-                    # 已存在 item：对比物料/金额/长文本。
-                    self._compare_item_material(row, item, diffs)
+                    # item 或 物料 不一致 → 新增一条；item 号已存在则让 SAP 自动分配，避免重号。
+                    write_item_no = not (self._norm(item.item) and self._norm(item.item) in existing_item_nos)
+                    self._base._write_item_row(next_row, item, write_item_no=write_item_no)
                     self.session.send_vkey(0)
-                    amount_text = self._enter_item_and_write_condition(row, item, result, diffs, is_new=False)
+                    amount_text, summary = self._enter_item_and_write_condition(next_row, item, result, is_new=True)
+                    next_row += 1
 
+                diffs.append(summary)  # 每条 item 一行汇总
                 sap_amount_text = amount_text or sap_amount_text
                 sap_amount_total += self._base._parse_amount(amount_text)
+
+            # SAP 有但 ODM 表格没有的行 → 每行一条提示，不删不改。
+            for row, item_no, material, amount in existing:
+                if row not in matched_rows:
+                    diffs.append(
+                        f"item {item_no}，物料 {material}，金额 {amount}，SAP 存在但 ODM 表格无，已跳过"
+                    )
 
             result.sap_amount_vat = (
                 self._base._format_amount(sap_amount_total) if len(items) > 1 else sap_amount_text
@@ -423,9 +438,13 @@ class OrderEditTransaction:
         result.message = "；".join(diffs) if diffs else "item 无差异"
         return result
 
-    def _read_existing_item_rows(self, max_rows: int = 50) -> dict[str, int]:
-        """读取 item 概览页现有行，返回 {item_no: 物理 row}。空行处停止扫描。"""
-        existing: dict[str, int] = {}
+    def _read_existing_item_rows(self, max_rows: int = 50) -> list[tuple[int, str, str, str]]:
+        """读取 item 概览页现有行的三要素 item/material/金额。
+
+        item/material/金额同在概览一行（第1/2/5格），返回 [(物理 row, item_no, material, 金额)]。
+        空行处停止扫描。金额列读不到时退回空串，不阻断扫描。
+        """
+        rows: list[tuple[int, str, str, str]] = []
         for row in range(max_rows):
             try:
                 item_no = (self.session.read_text(OrderTransaction._item_id(row)) or "").strip()
@@ -434,73 +453,133 @@ class OrderEditTransaction:
                 break
             if not item_no and not material:
                 break
-            if item_no:
-                existing[item_no] = row
-        return existing
+            try:
+                amount = (self.session.read_text(OrderTransaction._net_value_id(row)) or "").strip()
+            except SapUiError:
+                amount = ""
+            rows.append((row, item_no, material, amount))
+        return rows
 
-    def _compare_item_material(self, row: int, item: OrderItemData, diffs: list[str]) -> None:
-        """对比指定行的物料编码（Item Material Code）。"""
-        self._compare_and_set(
-            OrderTransaction._material_id(row),
-            item.material_code,
-            field=f"item {item.item} 物料",
-            diffs=diffs,
-        )
+    def _match_item_row(
+        self, existing: list[tuple[int, str, str, str]], item: OrderItemData, matched_rows: set[int]
+    ) -> int | None:
+        """在现有行中找 item_no 与 material 同时一致且未被占用的物理 row；找不到返回 None。"""
+        target_item = self._norm(item.item)
+        target_material = self._norm(item.material_code)
+        for row, item_no, material, _amount in existing:
+            if row in matched_rows:
+                continue
+            if self._norm(item_no) == target_item and self._norm(material) == target_material:
+                return row
+        return None
+
+    # T\09 item 长文本编辑器控件（仅文本，语言不动——编辑屏语言下拉不可改）。
+    _ITEM_LONG_TEXT_ID = (
+        "wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\09/"
+        "ssubSUBSCREEN_BODY:SAPMV45A:4152/subSUBSCREEN_TEXT:SAPLV70T:2100/"
+        "cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[1]/shell"
+    )
 
     def _enter_item_and_write_condition(
         self,
         row: int,
         item: OrderItemData,
         result: SapResult,
-        diffs: list[str],
         *,
         is_new: bool,
-    ) -> str:
-        """进入 item 详情，对比/写入金额条件与长文本，返回 SAP 金额文本。"""
-        self.session.focus(OrderTransaction._material_id(row), 10)
-        self.session.send_vkey(2)
+    ) -> tuple[str, str]:
+        """进入 item 详情写金额/长文本，返回 (概览权威净值, 单条 item 汇总文本)。
 
-        # 金额条件（Item price）：进入条件页对比。
-        condition_id = (
-            "wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\06/"
-            "ssubSUBSCREEN_BODY:SAPLV69A:6201/tblSAPLV69ATCTRL_KONDITIONEN/"
-            "txtKOMV-KBETR[3,5]"
-        )
-        self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\06")
-        field = f"item {item.item or '新'} 金额"
-        if self._compare_and_set(condition_id, item.revenue, field=field, diffs=diffs, amount=True):
-            self.session.focus(condition_id, 16)
-            self.session.send_vkey(0)
-        amount_text = self.session.read_text(condition_id)
-
-        # 长文本（Item Group Description）：对比更新。
-        if item.long_text:
-            self._compare_item_long_text(item, result, diffs)
-
-        self.session.press("wnd[0]/tbar[0]/btn[3]")
-        return amount_text
-
-    def _compare_item_long_text(self, item: OrderItemData, result: SapResult, diffs: list[str]) -> None:
-        """对比 item 长文本（T\\09）。"""
-        text_id = (
-            "wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\09/"
-            "ssubSUBSCREEN_BODY:SAPMV45A:4152/subSUBSCREEN_TEXT:SAPLV70T:2100/"
-            "cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[1]/shell"
-        )
-        self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\09")
-        if self._compare_and_set(text_id, item.long_text, field=f"item {item.item} 长文本", diffs=diffs):
-            try:
-                self.session.set_selection_indexes(text_id, 4, 4)
-                lang_id = (
-                    "wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\09/"
-                    "ssubSUBSCREEN_BODY:SAPMV45A:4152/subSUBSCREEN_TEXT:SAPLV70T:2100/cmbLV70T-SPRAS"
-                )
-                self.session.set_key(lang_id, "EN")
-                self.session.focus(lang_id)
+        新增 item 与已存在 item 的条件表布局不同，分别处理：
+            - is_new：完全沿用创建侧新增步骤（物料格进详情、价格条件 [3,5] 直接写）；
+            - 已存在：编辑对比（数量格进详情、价格条件 [3,1]，仅差异才写）。
+        """
+        if is_new:
+            # 新增 item：与创建侧新增步骤一致（复用 _base 的条件/长文本写法，价格条件 [3,5]）。
+            self.session.focus(OrderTransaction._material_id(row), 10)
+            self.session.send_vkey(2)
+            self._base._write_item_condition(format(item.revenue, ".2f"))
+            if item.long_text:
+                self._base._write_item_long_text(item.long_text, result)
+            summary = self._new_item_summary(item)
+        else:
+            # 已存在 item：按 SAP 录制聚焦数量格(ZMENG[2,row])双击进详情；价格条件在编辑屏第 1 行
+            # KBETR[3,1]（创建侧的 [3,5] 在编辑屏是空行/只读行，写入会抛 Property '.text' can not be set）。
+            self.session.focus(OrderTransaction._quantity_id(row), 16)
+            self.session.send_vkey(2)
+            condition_id = (
+                "wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\06/"
+                "ssubSUBSCREEN_BODY:SAPLV69A:6201/tblSAPLV69ATCTRL_KONDITIONEN/"
+                "txtKOMV-KBETR[3,1]"
+            )
+            self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\06")
+            amount_diff = self._diff_set(condition_id, item.revenue, amount=True)
+            if amount_diff and amount_diff[0]:
+                self.session.focus(condition_id, 16)
                 self.session.send_vkey(0)
-                self.session.set_selection_indexes(text_id, 0, 0)
-            except SapUiError:
-                result.append_message("Long Text 更新失败")
+
+            # 长文本：仅写文本本身，不动语言（编辑屏 cmbLV70T-SPRAS 不可改，set_key 会抛
+            # Property '.key' can not be set，且为原始 COM 异常）。
+            text_diff = None
+            if item.long_text:
+                self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\09")
+                text_diff = self._diff_set(self._ITEM_LONG_TEXT_ID, item.long_text)
+
+            summary = self._matched_item_summary(item, amount_diff, text_diff)
+
+        # 返回概览页后，从同一行第5格（NETWR）读取权威净值金额；条件页 KBETR 对部分单读不到。
+        self.session.press("wnd[0]/tbar[0]/btn[3]")
+        try:
+            amount_text = self.session.read_text(OrderTransaction._net_value_id(row))
+        except SapUiError:
+            amount_text = ""
+        return amount_text, summary
+
+    # ------------------------------------------------------------------ #
+    # item 差异原语与单行汇总
+    # ------------------------------------------------------------------ #
+    def _diff_set(self, element_id: str, new_value, *, amount: bool = False) -> tuple[bool, str, str] | None:
+        """读现值→对比→仅差异才写。返回 (是否变化, 旧值, 新值)；控件读不到返回 None。"""
+        try:
+            current = self.session.read_text(element_id)
+        except SapUiError:
+            return None
+        old = self._norm(current)
+        if amount:
+            cur_cmp, new_disp = self._norm_amount(current), self._norm_amount(new_value)
+        else:
+            cur_cmp, new_disp = old, self._norm(new_value)
+        if cur_cmp == (self._norm_amount(new_value) if amount else self._norm(new_value)):
+            return (False, old, new_disp)
+        self.session.set_text(element_id, new_disp)
+        return (True, old, new_disp)
+
+    @staticmethod
+    def _field_summary(label: str, diff: tuple[bool, str, str] | None) -> str:
+        """单字段汇总片段：读不到→`X读取失败`，无变化→`X无更新`，有变化→`X 旧→新`。"""
+        if diff is None:
+            return f"{label}读取失败"
+        changed, old, new = diff
+        return f"{label} {old}→{new}" if changed else f"{label}无更新"
+
+    def _matched_item_summary(
+        self, item: OrderItemData, amount_diff: tuple[bool, str, str] | None,
+        text_diff: tuple[bool, str, str] | None,
+    ) -> str:
+        """命中 item 的单行汇总：`item X，物料 Y，金额…，文本…`（无长文本则省略文本段）。"""
+        parts = [f"item {self._norm(item.item)}", f"物料 {self._norm(item.material_code)}",
+                 self._field_summary("金额", amount_diff)]
+        if item.long_text:
+            parts.append(self._field_summary("文本", text_diff))
+        return "，".join(parts)
+
+    def _new_item_summary(self, item: OrderItemData) -> str:
+        """新增 item 的单行汇总：`item X，物料 Y，新增，金额 V[，文本 T]`。"""
+        parts = [f"item {self._norm(item.item) or '新'}", f"物料 {self._norm(item.material_code)}",
+                 "新增", f"金额 {format(item.revenue, '.2f')}"]
+        if item.long_text:
+            parts.append(f"文本 {self._norm(item.long_text)}")
+        return "，".join(parts)
 
     # ------------------------------------------------------------------ #
     # sub 编辑（Data B / Plan Cost，严格对比口径）

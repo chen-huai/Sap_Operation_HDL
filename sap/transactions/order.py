@@ -430,9 +430,13 @@ class OrderTransaction:
             return self._format_amount(sap_amount_total)
         return sap_amount_text
 
-    def _write_item_row(self, row: int, item: OrderItemData) -> None:
-        """Write one item row."""
-        if item.item:
+    def _write_item_row(self, row: int, item: OrderItemData, *, write_item_no: bool = True) -> None:
+        """Write one item row.
+
+        write_item_no=False 时跳过 POSNR 写入，交由 SAP 自动分配号——
+        编辑场景新增行且该 item 号已存在时用，避免 POSNR 重号报错。
+        """
+        if write_item_no and item.item:
             self.session.set_text(self._item_id(row), item.item)
         self.session.set_text(self._material_id(row), item.material_code)
         self.session.set_text(self._quantity_id(row), item.quantity)
@@ -472,6 +476,15 @@ class OrderTransaction:
             "wnd[0]/usr/tabsTAXI_TABSTRIP_OVERVIEW/tabpT\\02/"
             "ssubSUBSCREEN_BODY:SAPMV45A:4415/subSUBSCREEN_TC:SAPMV45A:4902/"
             f"tblSAPMV45ATCTRL_U_ERF_GUTLAST/ctxtVBAP-ZIEME[3,{row}]"
+        )
+
+    @staticmethod
+    def _net_value_id(row: int) -> str:
+        """Return net value (金额) field id for row —— 概览行第5格，与 item/material 同行。"""
+        return (
+            "wnd[0]/usr/tabsTAXI_TABSTRIP_OVERVIEW/tabpT\\02/"
+            "ssubSUBSCREEN_BODY:SAPMV45A:4415/subSUBSCREEN_TC:SAPMV45A:4902/"
+            f"tblSAPMV45ATCTRL_U_ERF_GUTLAST/txtVBAP-NETWR[4,{row}]"
         )
 
     def _write_item_condition(self, value) -> str:
