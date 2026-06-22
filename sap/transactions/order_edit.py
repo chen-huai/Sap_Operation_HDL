@@ -419,7 +419,8 @@ class OrderEditTransaction:
                     amount_text, summary = self._enter_item_and_write_condition(next_row, item, result, is_new=True)
                     next_row += 1
 
-                diffs.append(summary)  # 每条 item 一行汇总
+                if summary:  # 仅有更新/新增的 item 才输出，无变化静默
+                    diffs.append(summary)
                 sap_amount_text = amount_text or sap_amount_text
                 sap_amount_total += self._base._parse_amount(amount_text)
 
@@ -427,7 +428,7 @@ class OrderEditTransaction:
             for row, item_no, material, amount in existing:
                 if row not in matched_rows:
                     diffs.append(
-                        f"item {item_no}，物料 {material}，金额 {amount}，SAP 存在但 ODM 表格无，已跳过"
+                        f"item {item_no} 物料 {material} 金额 {amount}：SAP 有、Excel 无，已跳过"
                     )
 
             result.sap_amount_vat = (
@@ -554,32 +555,36 @@ class OrderEditTransaction:
         self.session.set_text(element_id, new_disp)
         return (True, old, new_disp)
 
-    @staticmethod
-    def _field_summary(label: str, diff: tuple[bool, str, str] | None) -> str:
-        """单字段汇总片段：读不到→`X读取失败`，无变化→`X无更新`，有变化→`X 旧→新`。"""
-        if diff is None:
-            return f"{label}读取失败"
-        changed, old, new = diff
-        return f"{label} {old}→{new}" if changed else f"{label}无更新"
-
     def _matched_item_summary(
         self, item: OrderItemData, amount_diff: tuple[bool, str, str] | None,
         text_diff: tuple[bool, str, str] | None,
     ) -> str:
-        """命中 item 的单行汇总：`item X，物料 Y，金额…，文本…`（无长文本则省略文本段）。"""
-        parts = [f"item {self._norm(item.item)}", f"物料 {self._norm(item.material_code)}",
-                 self._field_summary("金额", amount_diff)]
+        """命中 item 的单行汇总：只列真正变化的字段；无变化返回空串(调用方不输出)。
+
+        例：`item 10 物料 ABC 金额 500 → 400.00`。
+        """
+        parts: list[str] = []
+        if amount_diff is None:
+            parts.append("金额读取失败")
+        elif amount_diff[0]:
+            parts.append(f"金额 {amount_diff[1]} → {amount_diff[2]}")
         if item.long_text:
-            parts.append(self._field_summary("文本", text_diff))
-        return "，".join(parts)
+            if text_diff is None:
+                parts.append("文本读取失败")
+            elif text_diff[0]:
+                parts.append(f"文本 {text_diff[1]} → {text_diff[2]}")
+        if not parts:
+            return ""
+        head = f"item {self._norm(item.item)} 物料 {self._norm(item.material_code)}"
+        return f"{head} " + "，".join(parts)
 
     def _new_item_summary(self, item: OrderItemData) -> str:
-        """新增 item 的单行汇总：`item X，物料 Y，新增，金额 V[，文本 T]`。"""
-        parts = [f"item {self._norm(item.item) or '新'}", f"物料 {self._norm(item.material_code)}",
-                 "新增", f"金额 {format(item.revenue, '.2f')}"]
+        """新增 item 的单行汇总：`item X 物料 Y 新增金额 V[，文本 T]`。"""
+        head = f"item {self._norm(item.item) or '新'} 物料 {self._norm(item.material_code)}"
+        parts = [f"新增金额 {format(item.revenue, '.2f')}"]
         if item.long_text:
             parts.append(f"文本 {self._norm(item.long_text)}")
-        return "，".join(parts)
+        return f"{head} " + "，".join(parts)
 
     # ------------------------------------------------------------------ #
     # sub 编辑（Data B / Plan Cost，严格对比口径）
@@ -668,6 +673,8 @@ class OrderEditTransaction:
         result.message = "；".join(diffs) if diffs else "Data B 无差异"
         return result
 
+    _PLAN_COST_TABLE = "wnd[0]/usr/tblSAPLKKDI1301_TC"
+
     def edit_plan_cost(
         self,
         entries: list[PlanCostEntry],
@@ -675,38 +682,121 @@ class OrderEditTransaction:
         *,
         focus_row: int = 0,
     ) -> SapResult:
-        """对比并更新计划成本；口径与创建 apply_plan_cost_entries 一致。
+        """按 成本中心+类别 匹配更新计划成本（每条 entry 一行汇总）。
 
-        进入计划成本编辑器后按 row 对比 TYPPS/HERK2/HERK3/MENGE，仅差异才写。
+        规则（同 item 编辑）：
+            - 成本中心 与 类别 均一致 → 仅更新不同的金额/时间(MENGE)，不碰类型/中心/类别；
+            - 成本中心 或 类别 有一个不同 → 新增一行（写全 TYPPS/HERK2/HERK3/MENGE，同创建）；
+            - SAP 有、ODM 表无 → 记录提示，不删不改。
         """
         result = SapResult(step="edit_plan_cost")
         try:
             self._base._ensure_item_overview()
-            self._base._open_plan_cost_editor(OrderTransaction._material_id(focus_row))
-            for row, entry in enumerate(entries):
-                if not entry.cost_center:
-                    continue
-                base = f"wnd[0]/usr/tblSAPLKKDI1301_TC"
-                self._compare_and_set(f"{base}/ctxtRK70L-TYPPS[2,{row}]", "E",
-                                      field=f"PlanCost[{row}]类型", diffs=diffs)
-                self._compare_and_set(f"{base}/ctxtRK70L-HERK2[3,{row}]", entry.cost_center,
-                                      field=f"PlanCost[{row}]成本中心", diffs=diffs)
-                self._compare_and_set(f"{base}/ctxtRK70L-HERK3[4,{row}]", entry.category,
-                                      field=f"PlanCost[{row}]类别", diffs=diffs)
-                if self._compare_and_set(f"{base}/txtRK70L-MENGE[6,{row}]", entry.amount,
-                                         field=f"PlanCost[{row}]数量", diffs=diffs, amount=True):
-                    self.session.focus(f"{base}/txtRK70L-MENGE[6,{row}]", 20)
-                    self.session.send_vkey(0)
+            self._open_plan_cost_editor_for_edit(OrderTransaction._material_id(focus_row))
+
+            valid = [e for e in entries if e.cost_center]
+            existing = self._read_existing_plan_cost_rows()  # [(row, cost_center, category, amount)]
+            matched_rows: set[int] = set()
+            next_row = len(existing)
+
+            for entry in valid:
+                row = self._match_plan_cost_row(existing, entry, matched_rows)
+                if row is not None:
+                    # 成本中心+类别一致 → 仅更新金额/时间(MENGE)，无变化不输出。
+                    matched_rows.add(row)
+                    menge_id = f"{self._PLAN_COST_TABLE}/txtRK70L-MENGE[6,{row}]"
+                    amount_diff = self._diff_set(menge_id, entry.amount, amount=True)
+                    if amount_diff is None:
+                        diffs.append(f"{self._plan_cost_head(entry.cost_center, entry.category)} 数量读取失败")
+                    elif amount_diff[0]:
+                        self.session.focus(menge_id, 20)
+                        self.session.send_vkey(0)
+                        diffs.append(self._plan_cost_changed_summary(entry, amount_diff))
+                else:
+                    # 成本中心或类别不同 → 新增一行（复用创建侧单行写法）。
+                    self._base._apply_single_plan_cost_entry(next_row, entry)
+                    diffs.append(self._plan_cost_new_summary(entry))
+                    next_row += 1
+
+            # SAP 有但 ODM 表格没有的计划成本行 → 每行一条提示，不删不改。
+            for row, cost_center, category, amount in existing:
+                if row not in matched_rows:
+                    label = self._plan_cost_label(category)
+                    diffs.append(
+                        f"{self._plan_cost_head(cost_center, category)} {label} {amount}：SAP 有、Excel 无，已跳过"
+                    )
+
             self.session.press("wnd[0]/tbar[0]/btn[3]")
-            # 退出编辑器时若弹"是否保存"确认框，按 OPTION1 兜底确认。
-            try:
-                self.session.press("wnd[1]/usr/btnSPOP-OPTION1")
-            except SapUiError:
-                pass
+            # 退出编辑器时若弹"是否保存"确认框，按 OPTION1 兜底确认（无则跳过）。
+            self._try_press("wnd[1]/usr/btnSPOP-OPTION1")
         except Exception as exc:
             return SapResult.fail(f"plan cost 编辑失败，{exc}", step="edit_plan_cost")
         result.message = "；".join(diffs) if diffs else "Plan Cost 无差异"
         return result
+
+    def _open_plan_cost_editor_for_edit(self, focus_element_id: str) -> None:
+        """编辑场景打开计划成本编辑器：容错处理"选择计算变式"弹窗。
+
+        已有计划成本的 item 再次进入编辑器通常不弹 btnSPOP-VAROPTION1 选择框，
+        故对该弹窗按钮用 _try_press 容错（缺失即跳过），避免硬按报"找不到 SAP 元素"。
+        """
+        self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_OVERVIEW/tabpT\\02")
+        self.session.focus(focus_element_id, 0)
+        self.session.find("wnd[0]/mbar/menu[3]/menu[7]").select()
+        self._try_press("wnd[1]/usr/btnSPOP-VAROPTION1")
+        self._try_press("wnd[1]/tbar[0]/btn[0]")
+
+    def _read_existing_plan_cost_rows(self, max_rows: int = 50) -> list[tuple[int, str, str, str]]:
+        """读取计划成本编辑器现有行，返回 [(row, cost_center, category, amount)]。空行处停止。"""
+        rows: list[tuple[int, str, str, str]] = []
+        for row in range(max_rows):
+            try:
+                cost_center = (self.session.read_text(f"{self._PLAN_COST_TABLE}/ctxtRK70L-HERK2[3,{row}]") or "").strip()
+                category = (self.session.read_text(f"{self._PLAN_COST_TABLE}/ctxtRK70L-HERK3[4,{row}]") or "").strip()
+            except SapUiError:
+                break
+            if not cost_center and not category:
+                break
+            try:
+                amount = (self.session.read_text(f"{self._PLAN_COST_TABLE}/txtRK70L-MENGE[6,{row}]") or "").strip()
+            except SapUiError:
+                amount = ""
+            rows.append((row, cost_center, category, amount))
+        return rows
+
+    def _match_plan_cost_row(
+        self, existing: list[tuple[int, str, str, str]], entry: PlanCostEntry, matched_rows: set[int]
+    ) -> int | None:
+        """找 成本中心 与 类别 同时一致且未占用的行；找不到返回 None。"""
+        cc, cat = self._norm(entry.cost_center), self._norm(entry.category)
+        for row, cost_center, category, _amount in existing:
+            if row in matched_rows:
+                continue
+            if self._norm(cost_center) == cc and self._norm(category) == cat:
+                return row
+        return None
+
+    def _plan_cost_label(self, category) -> str:
+        """计划成本数量列标签：T01AST(工时)→"时间"，其余→"金额"。"""
+        return "时间" if self._norm(category) == "T01AST" else "金额"
+
+    def _plan_cost_head(self, cost_center, category) -> str:
+        """计划成本行抬头：`计划成本 成本中心{中心}({类别})`。"""
+        return f"计划成本 成本中心{self._norm(cost_center)}({self._norm(category)})"
+
+    def _plan_cost_changed_summary(
+        self, entry: PlanCostEntry, amount_diff: tuple[bool, str, str]
+    ) -> str:
+        """命中且有变化：`计划成本 成本中心X(类别) 金额|时间 旧 → 新`。"""
+        _changed, old, new = amount_diff
+        label = self._plan_cost_label(entry.category)
+        return f"{self._plan_cost_head(entry.cost_center, entry.category)} {label} {old} → {new}"
+
+    def _plan_cost_new_summary(self, entry: PlanCostEntry) -> str:
+        """新增行：`计划成本 成本中心X(类别) 新增金额|时间 值`。"""
+        label = self._plan_cost_label(entry.category)
+        head = self._plan_cost_head(entry.cost_center, entry.category)
+        return f"{head} 新增{label} {format(float(entry.amount), '.2f')}"
 
     # ------------------------------------------------------------------ #
     # 复用创建侧 open/save
