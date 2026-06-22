@@ -225,6 +225,8 @@ class SapResult:
     sap_amount_vat: str = ""
     # 当前结果对应的步骤标识。
     step: str = ""
+    # 警告标记：操作未失败（success=True）但有需提示用户的情况（如跳过），UI 用区别色显示。
+    warning: bool = False
 
     @staticmethod
     def fail(msg: str, *, step: str = "") -> "SapResult":

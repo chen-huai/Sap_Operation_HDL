@@ -474,6 +474,19 @@ class OrderEditTransaction:
                 return row
         return None
 
+    def _find_item_physical_row(self, target_item) -> int | None:
+        """在 SAP item 概览页找 item 号等于 target_item 的物理 row；找不到返回 None。
+
+        用于计划成本按 item 定位（ODM item 编号与 SAP 实际编号可能不同，需精确匹配）。
+        """
+        target = self._norm(target_item)
+        if not target:
+            return None
+        for row, item_no, _material, _amount in self._read_existing_item_rows():
+            if self._norm(item_no) == target:
+                return row
+        return None
+
     # T\09 item 长文本编辑器控件（仅文本，语言不动——编辑屏语言下拉不可改）。
     _ITEM_LONG_TEXT_ID = (
         "wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\09/"
@@ -680,9 +693,12 @@ class OrderEditTransaction:
         entries: list[PlanCostEntry],
         diffs: list[str],
         *,
-        focus_row: int = 0,
+        target_item: str,
     ) -> SapResult:
-        """按 成本中心+类别 匹配更新计划成本（每条 entry 一行汇总）。
+        """按 成本中心+类别 匹配更新指定 SAP item 的计划成本（每条 entry 一行汇总）。
+
+        先按 item 号在 SAP item 概览页定位物理行（ODM 与 SAP item 编号可能不同），
+        再对该 item 打开计划成本编辑器。SAP 不存在该 item → 不开编辑器、成功跳过。
 
         规则（同 item 编辑）：
             - 成本中心 与 类别 均一致 → 仅更新不同的金额/时间(MENGE)，不碰类型/中心/类别；
@@ -692,6 +708,12 @@ class OrderEditTransaction:
         result = SapResult(step="edit_plan_cost")
         try:
             self._base._ensure_item_overview()
+            focus_row = self._find_item_physical_row(target_item)
+            if focus_row is None:
+                # SAP 无此 item：不失败、不开编辑器，但标 warning 让 UI 用区别色提示。
+                result.warning = True
+                result.message = f"SAP 无对应 item {self._norm(target_item)}，已跳过"
+                return result
             self._open_plan_cost_editor_for_edit(OrderTransaction._material_id(focus_row))
 
             valid = [e for e in entries if e.cost_center]

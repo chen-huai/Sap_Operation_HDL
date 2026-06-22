@@ -314,6 +314,33 @@ class SapOrderMixin:
             ))
         return entries
 
+    def _append_step_result(self, step_name, step_result):
+        """把单个 SAP 步骤结果渲染到 textBrowser，按严重度区分颜色（创建/编辑两流程共用）。
+
+        优先级（高→低）：
+            - success=False → 红色「失败」；
+            - 消息含"读取失败"（控件读不到，疑似控件 ID bug）→ 红色「异常」；
+            - warning 标记 或 消息含"已跳过"（如 SAP 无对应 item、SAP 有/Excel 无）→ 橙色「警告」；
+            - 其余 → 默认色「成功」。
+        """
+        message = step_result.message or ''
+        if not step_result.success:
+            self.textBrowser.append(
+                "<font color='red'>%s 失败: %s</font>" % (step_name, message or '未知错误')
+            )
+        elif '读取失败' in message:
+            self.textBrowser.append(
+                "<font color='red'>%s 异常: %s</font>" % (step_name, message)
+            )
+        elif step_result.warning or '已跳过' in message:
+            self.textBrowser.append(
+                "<font color='orange'>%s 警告: %s</font>" % (step_name, message)
+            )
+        else:
+            suffix = ': %s' % message if message else ''
+            self.textBrowser.append('%s 成功%s' % (step_name, suffix))
+        QApplication.processEvents()
+
     def _edit_order_row(
         self,
         index,
@@ -335,16 +362,7 @@ class SapOrderMixin:
         va02Check→编辑 item；planCostCheck→编辑 Plan Cost；labCostCheck→编辑 Data B。
         未勾选的步骤直接跳过。全程收集差异写入 log Remark，操作类型标记 Edit。
         """
-        def _report_step(step_name, step_result):
-            if step_result.success:
-                suffix = ': %s' % step_result.message if step_result.message else ''
-                self.textBrowser.append('%s 成功%s' % (step_name, suffix))
-            else:
-                message = step_result.message or '未知错误'
-                self.textBrowser.append(
-                    "<font color='red'>%s 失败: %s</font>" % (step_name, message)
-                )
-            QApplication.processEvents()
+        _report_step = self._append_step_result
 
         combine_id = self._excel_str(order_row.get('Combine Id'))
         primary_cs = self._excel_str(order_row.get('Primary CS'))
@@ -389,14 +407,15 @@ class SapOrderMixin:
             remarks.append(f"Item:{item_result.message}" if item_result.message else "Item")
             _report_step('Item 编辑', item_result)
 
-        # Plan Cost 编辑（planCostCheck）：按 order.items 物理 row 顺序调度。
+        # Plan Cost 编辑（planCostCheck）：按 item 号匹配 SAP 实际行（编号可能与 ODM 不同），
+        # SAP 无对应 item 则在事务层成功跳过。
         if flow_options.get('planCostCheck'):
-            for row, item in enumerate(order.items):
+            for item in order.items:
                 plan_cost_entries = plan_cost_entries_by_item.get(item.item)
                 if not plan_cost_entries:
                     continue
                 pc_diffs: list[str] = []
-                plan_result = service.edit_plan_cost(plan_cost_entries, pc_diffs, focus_row=row)
+                plan_result = service.edit_plan_cost(plan_cost_entries, pc_diffs, target_item=item.item)
                 remarks.append(
                     f"Plan Cost {item.item}:{plan_result.message}"
                     if plan_result.message else f"Plan Cost {item.item}"
@@ -697,17 +716,7 @@ class SapOrderMixin:
                 # 因为 Data B 依赖已落盘的 SAP item 号（1000/2000 等）。
                 sap_amount_vat = ''
 
-                def _report_step(step_name, step_result):
-                    """步骤结果落到 textBrowser；失败时红字附带错误原因。"""
-                    if step_result.success:
-                        suffix = ': %s' % step_result.message if step_result.message else ''
-                        self.textBrowser.append('%s 成功%s' % (step_name, suffix))
-                    else:
-                        message = step_result.message or '未知错误'
-                        self.textBrowser.append(
-                            "<font color='red'>%s 失败: %s</font>" % (step_name, message)
-                        )
-                    QApplication.processEvents()
+                _report_step = self._append_step_result
 
                 # Step 1: VA01 创建订单头
                 va01_done = False

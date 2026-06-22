@@ -54,10 +54,10 @@ class OrderEditService:
         entries: list[PlanCostEntry],
         diffs: list[str],
         *,
-        focus_row: int = 0,
+        target_item: str,
     ) -> SapResult:
-        """对比并更新计划成本。"""
-        return self.transaction.edit_plan_cost(entries, diffs, focus_row=focus_row)
+        """对比并更新指定 SAP item 的计划成本（按 item 号定位，SAP 无此 item 则跳过）。"""
+        return self.transaction.edit_plan_cost(entries, diffs, target_item=target_item)
 
     def save(self, info: str) -> SapResult:
         """保存当前订单页面。"""
