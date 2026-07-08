@@ -30,7 +30,7 @@ def make_config(**overrides) -> SapConfig:
         sales_organization="3002",
         distribution_channels="10",
         sales_office="1000",
-        cost_center="1100",
+        sales_group="200",
         sub_cost_center_cs="1101",
         sub_cost_center_chm="1102",
         sub_cost_center_phy="1103",
