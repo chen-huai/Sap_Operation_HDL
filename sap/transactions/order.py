@@ -18,7 +18,6 @@ from sap.models import (
 )
 from sap.rules import (
     resolve_data_a_key,
-    should_fill_auftragswert,
     should_fill_ic_transaction,
 )
 from sap.session import SapSession
@@ -151,12 +150,8 @@ class OrderTransaction:
                     "ssubSUBSCREEN_BODY:SAPMV45A:4312/ctxtZAUFTD-IC_TRANSAKTION",
                     "O1",
                 )
-            if should_fill_auftragswert(revenue, self.config):
-                self.session.set_text(
-                    "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/"
-                    "ssubSUBSCREEN_BODY:SAPMV45A:4312/txtZAUFTD-AUFTRAGSWERT",
-                    format(revenue.revenue_cny, ".2f"),
-                )
+            # 订单价值(AUFTRAGSWERT) 不在此处写入：item 尚未录入，此时无法按"Σ item 净值 × 汇率"
+            # 计算。改由 fill_order_value() 在 item 全部录入后统一回填（创建/编辑同口径）。
         except Exception as exc:
             return SapResult.fail(f"Order No未创建成功，{exc}", step="va01")
         return result
@@ -227,31 +222,24 @@ class OrderTransaction:
         self,
         entries: list[DataBEntry],
         order: OrderData,
-        *,
-        auftragswert_cny: float = 0.0,
     ) -> SapResult:
         """按已计算好的 Data B 明细写入人工成本。
 
         Args:
             entries: Data B 明细列表（DataBEntry）。
             order: 订单数据，用于读取 sales_group 决定是否写入 item 号。
-            auftragswert_cny: 所有 item 加和金额（CNY），≥ 阈值时回填订单价值字段。
 
         Returns:
             SapResult: 写入成功或失败信息。
+
+        Note:
+            订单价值(AUFTRAGSWERT) 已从本方法剥离，改由 fill_order_value() 独立步骤回填。
         """
         result = SapResult(step="lab_cost")
         try:
             # 进入售达方，data b：最大化主窗口，进入抬头视图，切换到 T\14 页签。
             self.session.press("wnd[0]/usr/subSUBSCREEN_HEADER:SAPMV45A:4021/btnBT_HEAD")
             self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14")
-            # 所有 item 加和金额（CNY）达到阈值时回填订单价值字段。
-            if auftragswert_cny >= self.config.revenue_threshold:
-                self.session.set_text(
-                    "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/"
-                    "ssubSUBSCREEN_BODY:SAPMV45A:4312/txtZAUFTD-AUFTRAGSWERT",
-                    format(auftragswert_cny, ".2f"),
-                )
             for row, entry in enumerate(entries):
                 performer_cost_center = entry.performer_cost_center.strip()
                 rate_cost_center = (entry.rate_cost_center or performer_cost_center).strip()
@@ -486,6 +474,72 @@ class OrderTransaction:
             "ssubSUBSCREEN_BODY:SAPMV45A:4415/subSUBSCREEN_TC:SAPMV45A:4902/"
             f"tblSAPMV45ATCTRL_U_ERF_GUTLAST/txtVBAP-NETWR[4,{row}]"
         )
+
+    @staticmethod
+    def _auftragswert_id() -> str:
+        """Return 订单价值(AUFTRAGSWERT) 字段 id —— 抬头 Data B(T\\14) 页签。"""
+        return (
+            "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/"
+            "ssubSUBSCREEN_BODY:SAPMV45A:4312/txtZAUFTD-AUFTRAGSWERT"
+        )
+
+    def _sum_item_net_values(self, max_rows: int = 200) -> tuple[float, bool]:
+        """读 item 概览各行未税净值(VBAP-NETWR)加和；遇空行(POSNR 为空/读不到)停止。
+
+        金额为单据币种(如 USD/EUR)口径，换算 CNY 由调用方 × 汇率完成。
+        max_rows 仅作防跑飞的安全上限；正常终止条件是遇到空行。
+
+        Returns:
+            (total, truncated): total 为净值加和；truncated 为 True 表示扫到 max_rows
+            上限时各行仍非空——可能有 item 未计入，调用方应据此告警而非静默少算。
+        """
+        total = 0.0
+        for row in range(max_rows):
+            try:
+                item_no = (self.session.read_text(self._item_id(row)) or "").strip()
+            except Exception:
+                return total, False
+            if not item_no:
+                return total, False
+            total += self._parse_amount(self.session.read_text(self._net_value_id(row)))
+        return total, True
+
+    def fill_order_value(self, order: OrderData) -> SapResult:
+        """回填订单价值(AUFTRAGSWERT)：Σ SAP item 未税净值 × 汇率，达阈值才写。
+
+        必须在 item 全部录入(概览页可读 NETWR)后调用。流程：切 item 概览读净值加和 →
+        换算 CNY → 进抬头 Data B(T\\14) 页 → ≥ revenue_threshold 时写入。
+
+        与旧"建单头即写 revenue_cny"的错误口径彻底分离，消除双重汇率（详见 fill_order_value 注释）。
+        """
+        result = SapResult(step="order_value")
+        try:
+            # 幂等切回 item 概览再读净值，消除对前置步骤(Add Item / Plan Cost)页面状态的依赖。
+            self._ensure_item_overview()
+            net_total, truncated = self._sum_item_net_values()
+            order_value_cny = net_total * (order.exchange_rate or 1.0)
+
+            # 进抬头 Data B 页签写入。
+            self.session.press("wnd[0]/usr/subSUBSCREEN_HEADER:SAPMV45A:4021/btnBT_HEAD")
+            self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14")
+            if order_value_cny >= self.config.revenue_threshold:
+                self.session.set_text(self._auftragswert_id(), format(order_value_cny, ".2f"))
+                result.message = (
+                    f"订单价值 {format(order_value_cny, '.2f')} "
+                    f"(净值 {format(net_total, '.2f')} × {order.exchange_rate or 1.0})"
+                )
+            else:
+                result.message = (
+                    f"订单价值 {format(order_value_cny, '.2f')} < 阈值 "
+                    f"{format(self.config.revenue_threshold, '.2f')}，跳过写入"
+                )
+            # 截断告警放到最后 append，避免被上面的 result.message 直接赋值覆盖。
+            if truncated:
+                result.warning = True
+                result.append_message("item 行数超过扫描上限，订单价值可能少算，请人工核对")
+        except Exception as exc:
+            return SapResult.fail(f"订单价值回填失败，{exc}", step="order_value")
+        return result
 
     def _write_item_condition(self, value) -> str:
         """Open item condition tab and write amount."""

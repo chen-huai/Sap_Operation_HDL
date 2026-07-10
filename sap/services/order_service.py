@@ -46,20 +46,24 @@ class OrderService:
         self,
         entries: list[DataBEntry],
         order: OrderData,
-        *,
-        auftragswert_cny: float = 0.0,
     ) -> SapResult:
         """按已计算好的 Data B 明细写入人工成本。
 
         Args:
             entries: Data B 明细列表（DataBEntry）。
             order: 订单数据，用于读取 sales_group 决定是否写入 item 号。
-            auftragswert_cny: 所有 item 加和金额（CNY）。≥ 阈值时回填订单价值字段。
 
         Returns:
             SapResult: SAP 写入结果。
         """
-        return self.transaction.fill_lab_cost_entries(entries, order, auftragswert_cny=auftragswert_cny)
+        return self.transaction.fill_lab_cost_entries(entries, order)
+
+    def fill_order_value(self, order: OrderData) -> SapResult:
+        """回填订单价值(AUFTRAGSWERT)：Σ SAP item 未税净值 × 汇率，达阈值才写。
+
+        须在 item 全部录入后调用（读 SAP 概览净值，与创建/编辑同口径）。
+        """
+        return self.transaction.fill_order_value(order)
 
     def apply_plan_cost_entries(
         self,

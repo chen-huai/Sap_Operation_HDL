@@ -608,28 +608,19 @@ class OrderEditTransaction:
         sub_edit_entries: list[SubEditEntry],
         order: OrderData,
         diffs: list[str],
-        *,
-        auftragswert_cny: float = 0.0,
     ) -> SapResult:
         """对比并更新 Data B（人工成本）行；口径与创建 fill_lab_cost_entries 一致。
 
         命中行（按物理 row）对比执行部门/费率成本中心/固定价格；行不足时按创建写法补写。
         新列 Sub Site / Sub Site Transfer Price 控件 ID 待录制校正（见 TODO）。
+
+        Note:
+            订单价值(AUFTRAGSWERT) 已从本方法剥离，改由 edit_order_value() 独立步骤对比更新。
         """
         result = SapResult(step="edit_data_b")
         try:
             self.session.press("wnd[0]/usr/subSUBSCREEN_HEADER:SAPMV45A:4021/btnBT_HEAD")
             self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14")
-
-            if auftragswert_cny >= self.config.revenue_threshold:
-                self._compare_and_set(
-                    "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/"
-                    "ssubSUBSCREEN_BODY:SAPMV45A:4312/txtZAUFTD-AUFTRAGSWERT",
-                    auftragswert_cny,
-                    field="订单价值",
-                    diffs=diffs,
-                    amount=True,
-                )
 
             sub_site_by_item = {e.item: e for e in sub_edit_entries}
             for row, entry in enumerate(entries):
@@ -684,6 +675,42 @@ class OrderEditTransaction:
         except Exception as exc:
             return SapResult.fail(f"Data B 编辑失败，{exc}", step="edit_data_b")
         result.message = "；".join(diffs) if diffs else "Data B 无差异"
+        return result
+
+    def edit_order_value(self, order: OrderData, diffs: list[str]) -> SapResult:
+        """对比并更新订单价值(AUFTRAGSWERT)：Σ SAP item 未税净值 × 汇率。
+
+        口径与创建 fill_order_value 完全一致（Σ VBAP-NETWR × exchange_rate）。
+        达阈值写换算值；低于阈值时目标为空——既符合"小额不回填"规则，又能把历史因
+        双重汇率误写的脏值(如 35675)清空，供重跑编辑自愈。
+        """
+        result = SapResult(step="edit_order_value")
+        try:
+            # 读净值须在 item 概览页；复用创建事务的加和逻辑，保证与创建同口径。
+            self._base._ensure_item_overview()
+            net_total, truncated = self._base._sum_item_net_values()
+            order_value_cny = net_total * (order.exchange_rate or 1.0)
+
+            self.session.press("wnd[0]/usr/subSUBSCREEN_HEADER:SAPMV45A:4021/btnBT_HEAD")
+            self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14")
+            target = (
+                format(order_value_cny, ".2f")
+                if order_value_cny >= self.config.revenue_threshold
+                else ""
+            )
+            self._compare_and_set(
+                self._base._auftragswert_id(),
+                target,
+                field="订单价值",
+                diffs=diffs,
+                amount=True,
+            )
+            if truncated:
+                result.warning = True
+                diffs.append("订单价值:item 行数超过扫描上限，可能少算，请人工核对")
+        except Exception as exc:
+            return SapResult.fail(f"订单价值编辑失败，{exc}", step="edit_order_value")
+        result.message = "；".join(diffs) if diffs else "订单价值无差异"
         return result
 
     _PLAN_COST_TABLE = "wnd[0]/usr/tblSAPLKKDI1301_TC"

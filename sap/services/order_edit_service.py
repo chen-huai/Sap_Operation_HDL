@@ -41,13 +41,13 @@ class OrderEditService:
         sub_edit_entries: list[SubEditEntry],
         order: OrderData,
         diffs: list[str],
-        *,
-        auftragswert_cny: float = 0.0,
     ) -> SapResult:
         """对比并更新 Data B 行。"""
-        return self.transaction.edit_data_b(
-            entries, sub_edit_entries, order, diffs, auftragswert_cny=auftragswert_cny
-        )
+        return self.transaction.edit_data_b(entries, sub_edit_entries, order, diffs)
+
+    def edit_order_value(self, order: OrderData, diffs: list[str]) -> SapResult:
+        """对比并更新订单价值(AUFTRAGSWERT)：Σ SAP item 未税净值 × 汇率。"""
+        return self.transaction.edit_order_value(order, diffs)
 
     def edit_plan_cost(
         self,

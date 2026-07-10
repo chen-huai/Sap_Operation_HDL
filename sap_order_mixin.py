@@ -224,12 +224,15 @@ class SapOrderMixin:
         )
 
     def _build_revenue_from_order_row(self, order_row):
-        """从订单表读取 Revenue；只做对象适配，不再重新分配或计算业务金额。"""
+        """从订单表读取 Revenue；只做对象适配，不再重新分配或计算业务金额。
+
+        'Revenue' 列本身已是 CNY 换算值（= Untaxed amount × Rate），故 revenue_cny 直接取该值，
+        切勿再 × Rate（历史双重汇率 bug 根源）。订单价值改由 SAP item 净值加和 × 汇率单独计算。
+        """
         revenue = self._excel_float(order_row.get('Revenue'), self._excel_float(order_row.get('Untaxed amount')))
-        rate = self._excel_float(order_row.get('Rate'), 1.0)
         return RevenueData(
             revenue=revenue,
-            revenue_cny=revenue * rate,
+            revenue_cny=revenue,
         )
 
     def _build_sub_entries_from_dataframe(self, order_row, sub_df):
@@ -368,7 +371,6 @@ class SapOrderMixin:
         primary_cs = self._excel_str(order_row.get('Primary CS'))
         sales_name = self._excel_str(order_row.get('Sales'))
         excel_amount_vat = self._excel_str(order_row.get('Tax-inclusive amount'))
-        items_revenue_total = sum(item.revenue for item in order.items)
 
         self.textBrowser.append('========== No.%s [编辑] ==========' % (index + 1))
         self.textBrowser.append("Combine Id: %s" % combine_id)
@@ -424,14 +426,23 @@ class SapOrderMixin:
 
         # Data B 编辑（labCostCheck）。
         if flow_options.get('labCostCheck') and data_b_entries:
-            items_revenue_total_cny = items_revenue_total * (order.exchange_rate or 1.0)
             db_diffs: list[str] = []
             data_b_result = service.edit_data_b(
                 data_b_entries, sub_edit_entries, order, db_diffs,
-                auftragswert_cny=items_revenue_total_cny,
             )
             remarks.append(f"Data B:{data_b_result.message}" if data_b_result.message else "Data B")
             _report_step('Data B 编辑', data_b_result)
+
+        # 订单价值(AUFTRAGSWERT) 独立步骤：Σ SAP item 未税净值 × 汇率，与 Data B 门控解耦。
+        # 有 item 即重算回填（幂等，仅差异才写），并自愈历史双重汇率脏值。
+        if order.items:
+            ov_diffs: list[str] = []
+            order_value_result = service.edit_order_value(order, ov_diffs)
+            remarks.append(
+                f"订单价值:{order_value_result.message}"
+                if order_value_result.message else "订单价值"
+            )
+            _report_step('订单价值编辑', order_value_result)
 
         # 保存（saveCheck）。
         if flow_options.get('saveCheck'):
@@ -823,6 +834,18 @@ class SapOrderMixin:
                                 )
                                 _report_step('Plan Cost %s' % item.item, plan_result)
 
+                        # 订单价值(AUFTRAGSWERT) 独立步骤：item 全部录入后，读 SAP 概览净值加和 × 汇率
+                        # 回填抬头字段。与 Data B(labCostCheck) 解耦，仅在本次成功新增 item 时执行；
+                        # 写入抬头后由下方 Save VA02 统一落盘（first_va02_changed 已因加 item 置真）。
+                        if flow_options.get('va02Check') and item_added:
+                            order_value_result = service.fill_order_value(order)
+                            first_va02_changed = first_va02_changed or order_value_result.success
+                            remarks.append(
+                                f"订单价值:{order_value_result.message}"
+                                if order_value_result.message else "订单价值"
+                            )
+                            _report_step('订单价值', order_value_result)
+
                         need_data_b = flow_options.get('labCostCheck') and data_b_entries
                         # Data B 的 item 依赖已保存的 SAP item 号（1000/2000 等）。
                         # 如果本次新增了 item，即使未勾选 Save，也要先保存再重新打开 VA02 写 Data B。
@@ -864,12 +887,9 @@ class SapOrderMixin:
                                 _report_step('Open VA02 Data B', reopen_result)
 
                             if reopen_result.success:
-                                # items 加和换算 CNY，传给 service 用于判断是否回填订单价值字段。
-                                items_revenue_total_cny = items_revenue_total * (order.exchange_rate or 1.0)
                                 data_b_result = service.fill_lab_cost_entries(
                                     data_b_entries,
                                     order,
-                                    auftragswert_cny=items_revenue_total_cny,
                                 )
                                 remarks.append(
                                     f"Data B:{data_b_result.message}" if data_b_result.message else "Data B"

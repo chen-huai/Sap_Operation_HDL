@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sap.models import OrderData, RevenueData, SapConfig
+from sap.models import OrderData, SapConfig
 
 
 def resolve_data_a_key(order: OrderData, config: SapConfig) -> str:
@@ -12,11 +12,6 @@ def resolve_data_a_key(order: OrderData, config: SapConfig) -> str:
     if order.sap_no in config.data_az2:
         return "Z2"
     return "00"
-
-
-def should_fill_auftragswert(revenue: RevenueData, config: SapConfig) -> bool:
-    """判断是否需要在订单头写入订单价值。"""
-    return revenue.revenue_cny >= config.revenue_threshold
 
 
 def should_fill_ic_transaction(order: OrderData, config: SapConfig) -> bool:
