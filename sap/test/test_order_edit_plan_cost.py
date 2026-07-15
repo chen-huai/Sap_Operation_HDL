@@ -1,8 +1,9 @@
-"""VA02 编辑：计划成本按 成本中心+类别 匹配更新的回归测试。
+"""VA02 编辑：计划成本按行覆盖 + 删除多余行的回归测试。
 
 覆盖：①打开编辑器容错缺失的 btnSPOP-VAROPTION1 弹窗（原报"找不到 SAP 元素"）；
-②中心+类别一致→仅更新金额/时间；③中心或类别不同→新增；④SAP 多余行→提示；
-⑤按 item 号（而非位置）定位 SAP 物理行；⑥SAP 无对应 item→成功跳过。
+②按行覆盖 row0（全写 TYPPS/中心/类别/数量）；③中心不同也按位置覆盖、不新增；
+④SAP 多余行（Excel 无）用 Shift+F2 删除；⑤按 item 号（而非位置）定位 SAP 物理行；
+⑥SAP 无对应 item→成功跳过。
 """
 
 from __future__ import annotations
@@ -33,9 +34,10 @@ class _Element:
         self.key = ""
         self.caretPosition = 0
         self.focused = False
+        self.vkeys: list[int] = []
 
     def setFocus(self): self.focused = True
-    def sendVKey(self, _k): pass
+    def sendVKey(self, k): self.vkeys.append(k)
     def press(self): pass
     def select(self): pass
 
@@ -90,52 +92,48 @@ class EditPlanCostTest(unittest.TestCase):
         result = tx.edit_plan_cost([entry], diffs, target_item="10")
         self.assertTrue(result.success, result.message)  # 弹窗缺失不再报错
 
-    def test_matched_updates_amount_only(self):
+    def test_overwrites_row_by_position(self):
+        # 按行覆盖：row0 全写 TYPPS/中心/类别/数量（不再按主键匹配、不判差异）。
         preset = {**_item_row("10", "M1", 0), **_existing("1100", "FREMDL", "100.00", 0)}
         tx, raw = _make_tx(preset, self.MISSING)
         entry = PlanCostEntry(cost_center="1100", category="FREMDL", amount=500.0)
         diffs: list[str] = []
         result = tx.edit_plan_cost([entry], diffs, target_item="10")
         self.assertTrue(result.success, result.message)
-        self.assertEqual(raw.findById(_menge(0)).text, "500.00")  # 金额已更新
-        self.assertEqual(diffs, ["计划成本 成本中心1100(FREMDL) 金额 100.00 → 500.00"])
+        self.assertEqual(raw.findById(f"{TABLE}/ctxtRK70L-TYPPS[2,0]").text, "E")
+        self.assertEqual(raw.findById(_herk2(0)).text, "1100")
+        self.assertEqual(raw.findById(_herk3(0)).text, "FREMDL")
+        self.assertEqual(raw.findById(_menge(0)).text, "500.00")
+        self.assertEqual(diffs, ["计划成本 成本中心1100(FREMDL) 覆盖金额 500.00"])
 
-    def test_matched_no_diff_outputs_nothing(self):
-        preset = {**_item_row("10", "M1", 0), **_existing("1100", "T01AST", "8.00", 0)}
-        tx, raw = _make_tx(preset, self.MISSING)
-        entry = PlanCostEntry(cost_center="1100", category="T01AST", amount=8.0)
-        diffs: list[str] = []
-        result = tx.edit_plan_cost([entry], diffs, target_item="10")
-        self.assertTrue(result.success, result.message)
-        # 无变化 → 不输出任何行（只显示有更新的）。
-        self.assertEqual(diffs, [])
-
-    def test_different_center_adds_new_row(self):
+    def test_different_center_overwrites_in_place(self):
+        # 成本中心不同不再"新增行"，而是按位置直接覆盖 row0。
         preset = {**_item_row("10", "M1", 0), **_existing("1100", "FREMDL", "100.00", 0)}
         tx, raw = _make_tx(preset, self.MISSING)
         entry = PlanCostEntry(cost_center="2200", category="FREMDL", amount=300.0)
         diffs: list[str] = []
         result = tx.edit_plan_cost([entry], diffs, target_item="10")
         self.assertTrue(result.success, result.message)
-        # 新行落 row1，写全字段。
-        self.assertEqual(raw.findById(_herk2(1)).text, "2200")
-        self.assertEqual(raw.findById(_menge(1)).text, "300.00")
-        self.assertIn("计划成本 成本中心2200(FREMDL) 新增金额 300.00", diffs)
-        # 原 1100/FREMDL 未被 ODM 命中 → 多余提示。
-        self.assertIn("计划成本 成本中心1100(FREMDL) 金额 100.00：SAP 有、Excel 无，已跳过", diffs)
+        self.assertEqual(raw.findById(_herk2(0)).text, "2200")  # row0 被覆盖成 2200
+        self.assertEqual(raw.findById(_menge(0)).text, "300.00")
+        self.assertEqual(diffs, ["计划成本 成本中心2200(FREMDL) 覆盖金额 300.00"])
 
-    def test_sap_extra_row_warns(self):
+    def test_deletes_sap_extra_rows(self):
+        # 1 条 entry 覆盖 row0；SAP 多出的 row1（Excel 无）用 Shift+F2 删除。
         preset = {
             **_item_row("10", "M1", 0),
             **_existing("1100", "FREMDL", "100.00", 0), **_existing("2200", "T01AST", "8.00", 1),
         }
-        tx, _ = _make_tx(preset, self.MISSING)
+        tx, raw = _make_tx(preset, self.MISSING)
         entry = PlanCostEntry(cost_center="1100", category="FREMDL", amount=100.0)
         diffs: list[str] = []
         result = tx.edit_plan_cost([entry], diffs, target_item="10")
         self.assertTrue(result.success, result.message)
-        # 1100/FREMDL 无变化 → 不输出；仅 2200/T01AST 多余提示（T01AST 标签为"时间"）。
-        self.assertEqual(diffs, ["计划成本 成本中心2200(T01AST) 时间 8.00：SAP 有、Excel 无，已跳过"])
+        # row0 覆盖；row1 删除（聚焦 HERK2[3,1] + Shift+F2=vkey14）。
+        self.assertTrue(raw.findById(_herk2(1)).focused)
+        self.assertIn(14, raw.findById("wnd[0]").vkeys)
+        self.assertIn("计划成本 成本中心1100(FREMDL) 覆盖金额 100.00", diffs)
+        self.assertIn("计划成本 成本中心2200(T01AST) 时间 8.00：Excel 无，已删除", diffs)
 
     def test_locates_row_by_item_number_not_position(self):
         # SAP item 1000(行0)/2000(行1)；ODM item 2000 应定位到物理行1，而非位置0。

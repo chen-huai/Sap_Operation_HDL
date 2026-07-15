@@ -748,9 +748,10 @@ class OrderEditTransaction:
         diffs: list[str],
         item_no_map: dict[str, str] | None = None,
     ) -> SapResult:
-        """对比并更新 Data B（人工成本）行；口径与创建 fill_lab_cost_entries 一致。
+        """按行覆盖 Data B（人工成本）行；口径与创建 fill_lab_cost_entries 一致。
 
-        命中行（按物理 row）对比执行部门/费率成本中心/固定价格；行不足时按创建写法补写。
+        逐行（按物理 row）对比执行部门/费率成本中心/固定价格，仅差异才写（覆盖效果，更省）。
+        SAP 行数多于本次写入的多余行（Excel 无）→ 末行往前删（Data B 专用删除按钮 btnTABLOESCH）。
 
         Args:
             item_no_map: 中途 save+open 后建立的 ODM→SAP item 号映射；新增被 SAP 改号的
@@ -758,13 +759,17 @@ class OrderEditTransaction:
                 （见 .claude/plan/va02_edit_item_add_midsave.md）。未传或未命中时用原号。
 
         Note:
-            订单价值(AUFTRAGSWERT) 已从本方法剥离，改由 edit_order_value() 独立步骤对比更新。
+            - 订单价值(AUFTRAGSWERT) 已从本方法剥离，改由 edit_order_value() 独立步骤对比更新。
+            - 已知限制：Data B 某些状态的行无法覆盖，该状态本就不应更新，不做运行时防护。
         """
         result = SapResult(step="edit_data_b")
+        base = "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312"
         try:
             self.session.press("wnd[0]/usr/subSUBSCREEN_HEADER:SAPMV45A:4021/btnBT_HEAD")
             self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14")
+            existing_rows = self._count_existing_data_b_rows(base)
 
+            written = 0
             for row, entry in enumerate(entries):
                 performer = (entry.performer_cost_center or "").strip()
                 rate = (entry.rate_cost_center or performer).strip()
@@ -779,7 +784,7 @@ class OrderEditTransaction:
                 if not performer and not rate:
                     continue
 
-                base = "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312"
+                written += 1
                 self._compare_and_set(
                     f"{base}/tblSAPMV45AZULEISTENDE/ctxtTABL-KOSTL[0,{row}]",
                     performer,
@@ -813,10 +818,50 @@ class OrderEditTransaction:
                     diffs=diffs,
                     amount=True,
                 )
+
+            # Excel 没有的多余行（SAP 行数 > 写入行数）→ 末行往前删，避免删除后行号位移。
+            for row in range(existing_rows - 1, written - 1, -1):
+                try:
+                    performer = (self.session.read_text(
+                        f"{base}/tblSAPMV45AZULEISTENDE/ctxtTABL-KOSTL[0,{row}]"
+                    ) or "").strip()
+                except SapUiError:
+                    performer = ""
+                self._delete_data_b_row(base, row)
+                diffs.append(f"Data B 行{row}(执行部门{performer})：Excel 无，已删除")
         except Exception as exc:
             return SapResult.fail(f"Data B 编辑失败，{exc}", step="edit_data_b")
         result.message = "；".join(diffs) if diffs else "Data B 无差异"
         return result
+
+    def _delete_data_b_row(self, base: str, row: int) -> None:
+        """删除 Data B 指定行（见用户 SAP 录屏）：选中 ZULEISTENDE/KOSTENSAETZE 两个子表的该行
+        → 聚焦费率成本中心格 → 按专用删除按钮 btnTABLOESCH → 确认弹窗。
+
+        Data B 删除非"置空控件"，须两个子表同时选中该行再按删除按钮。
+        """
+        zul = f"{base}/tblSAPMV45AZULEISTENDE"
+        kos = f"{base}/tblSAPMV45AKOSTENSAETZE"
+        self.session.find(zul).getAbsoluteRow(row).selected = True
+        self.session.find(kos).getAbsoluteRow(row).selected = True
+        self.session.focus(f"{kos}/ctxtTABD-KOSTL[0,{row}]", 0)
+        self.session.press(f"{base}/btnTABLOESCH")
+        self._try_press("wnd[1]/usr/btnSPOP-OPTION1")
+
+    def _count_existing_data_b_rows(self, base: str, max_rows: int = 50) -> int:
+        """扫 Data B 执行部门列(ZULEISTENDE/ctxtTABL-KOSTL)到空行，返回现有行数。"""
+        count = 0
+        for row in range(max_rows):
+            try:
+                kostl = (self.session.read_text(
+                    f"{base}/tblSAPMV45AZULEISTENDE/ctxtTABL-KOSTL[0,{row}]"
+                ) or "").strip()
+            except SapUiError:
+                break
+            if not kostl:
+                break
+            count += 1
+        return count
 
     def edit_order_value(self, order: OrderData, diffs: list[str]) -> SapResult:
         """对比并更新订单价值(AUFTRAGSWERT)：Σ SAP item 未税净值 × 汇率。
@@ -863,15 +908,14 @@ class OrderEditTransaction:
         *,
         target_item: str,
     ) -> SapResult:
-        """按 成本中心+类别 匹配更新指定 SAP item 的计划成本（每条 entry 一行汇总）。
+        """按行覆盖指定 SAP item 的计划成本：Excel 有的行逐行覆盖，Excel 没有的多余行删除。
 
         先按 item 号在 SAP item 概览页实时定位物理行（ODM 与 SAP 编号可能不同、SAP 也可能
         重排，故每次重读匹配，不用写入时的行号）。SAP 不存在该 item → 不开编辑器、成功跳过。
 
-        规则（同 item 编辑）：
-            - 成本中心 与 类别 均一致 → 仅更新不同的金额/时间(MENGE)，不碰类型/中心/类别；
-            - 成本中心 或 类别 有一个不同 → 新增一行（写全 TYPPS/HERK2/HERK3/MENGE，同创建）；
-            - SAP 有、ODM 表无 → 记录提示，不删不改。
+        规则（用户确认，去主键匹配）：
+            - valid entries 从 row 0 逐行 `_apply_single_plan_cost_entry` 直接覆盖（TYPPS/中心/类别/数量全写）；
+            - SAP 行数多于 entries 的多余行（Excel 无）→ Shift+F2 删除，末行往前删避免行号位移。
         """
         result = SapResult(step="edit_plan_cost")
         try:
@@ -886,35 +930,19 @@ class OrderEditTransaction:
 
             valid = [e for e in entries if e.cost_center]
             existing = self._read_existing_plan_cost_rows()  # [(row, cost_center, category, amount)]
-            matched_rows: set[int] = set()
-            next_row = len(existing)
 
-            for entry in valid:
-                row = self._match_plan_cost_row(existing, entry, matched_rows)
-                if row is not None:
-                    # 成本中心+类别一致 → 仅更新金额/时间(MENGE)，无变化不输出。
-                    matched_rows.add(row)
-                    menge_id = f"{self._PLAN_COST_TABLE}/txtRK70L-MENGE[6,{row}]"
-                    amount_diff = self._diff_set(menge_id, entry.amount, amount=True)
-                    if amount_diff is None:
-                        diffs.append(f"{self._plan_cost_head(entry.cost_center, entry.category)} 数量读取失败")
-                    elif amount_diff[0]:
-                        self.session.focus(menge_id, 20)
-                        self.session.send_vkey(0)
-                        diffs.append(self._plan_cost_changed_summary(entry, amount_diff))
-                else:
-                    # 成本中心或类别不同 → 新增一行（复用创建侧单行写法）。
-                    self._base._apply_single_plan_cost_entry(next_row, entry)
-                    diffs.append(self._plan_cost_new_summary(entry))
-                    next_row += 1
+            # Excel 有的行：从 row 0 逐行覆盖（不再按成本中心+类别匹配，直接按位置全写）。
+            for row, entry in enumerate(valid):
+                self._base._apply_single_plan_cost_entry(row, entry)
+                diffs.append(self._plan_cost_overwrite_summary(entry))
 
-            # SAP 有但 ODM 表格没有的计划成本行 → 每行一条提示，不删不改。
-            for row, cost_center, category, amount in existing:
-                if row not in matched_rows:
-                    label = self._plan_cost_label(category)
-                    diffs.append(
-                        f"{self._plan_cost_head(cost_center, category)} {label} {amount}：SAP 有、Excel 无，已跳过"
-                    )
+            # Excel 没有的多余行（SAP 行数 > valid）：末行往前删，避免删除后行号位移。
+            for row, cost_center, category, amount in reversed(existing[len(valid):]):
+                self._delete_plan_cost_row(row)
+                label = self._plan_cost_label(category)
+                diffs.append(
+                    f"{self._plan_cost_head(cost_center, category)} {label} {amount}：Excel 无，已删除"
+                )
 
             self.session.press("wnd[0]/tbar[0]/btn[3]")
             # 退出编辑器时若弹"是否保存"确认框，按 OPTION1 兜底确认（无则跳过）。
@@ -923,6 +951,16 @@ class OrderEditTransaction:
             return SapResult.fail(f"plan cost 编辑失败，{exc}", step="edit_plan_cost")
         result.message = "；".join(diffs) if diffs else "Plan Cost 无差异"
         return result
+
+    def _delete_plan_cost_row(self, row: int) -> None:
+        """删除计划成本编辑器指定行：聚焦该行成本中心格后 Shift+F2（sendVKey 14）。
+
+        SAP 删除非"置空控件"，须定位行后触发 Shift+F2；聚焦 `HERK2[3,row]`（每行必有的
+        成本中心列，即本类读写用的列）即定位该行。删除后若弹确认框，OPTION1 兜底。
+        """
+        self.session.focus(f"{self._PLAN_COST_TABLE}/ctxtRK70L-HERK2[3,{row}]", 8)
+        self.session.send_vkey(14)
+        self._try_press("wnd[1]/usr/btnSPOP-OPTION1")
 
     def _open_plan_cost_editor_for_edit(self, focus_element_id: str) -> None:
         """编辑场景打开计划成本编辑器：容错处理"选择计算变式"弹窗。
@@ -954,18 +992,6 @@ class OrderEditTransaction:
             rows.append((row, cost_center, category, amount))
         return rows
 
-    def _match_plan_cost_row(
-        self, existing: list[tuple[int, str, str, str]], entry: PlanCostEntry, matched_rows: set[int]
-    ) -> int | None:
-        """找 成本中心 与 类别 同时一致且未占用的行；找不到返回 None。"""
-        cc, cat = self._norm(entry.cost_center), self._norm(entry.category)
-        for row, cost_center, category, _amount in existing:
-            if row in matched_rows:
-                continue
-            if self._norm(cost_center) == cc and self._norm(category) == cat:
-                return row
-        return None
-
     def _plan_cost_label(self, category) -> str:
         """计划成本数量列标签：T01AST(工时)→"时间"，其余→"金额"。"""
         return "时间" if self._norm(category) == "T01AST" else "金额"
@@ -974,19 +1000,11 @@ class OrderEditTransaction:
         """计划成本行抬头：`计划成本 成本中心{中心}({类别})`。"""
         return f"计划成本 成本中心{self._norm(cost_center)}({self._norm(category)})"
 
-    def _plan_cost_changed_summary(
-        self, entry: PlanCostEntry, amount_diff: tuple[bool, str, str]
-    ) -> str:
-        """命中且有变化：`计划成本 成本中心X(类别) 金额|时间 旧 → 新`。"""
-        _changed, old, new = amount_diff
-        label = self._plan_cost_label(entry.category)
-        return f"{self._plan_cost_head(entry.cost_center, entry.category)} {label} {old} → {new}"
-
-    def _plan_cost_new_summary(self, entry: PlanCostEntry) -> str:
-        """新增行：`计划成本 成本中心X(类别) 新增金额|时间 值`。"""
+    def _plan_cost_overwrite_summary(self, entry: PlanCostEntry) -> str:
+        """按行覆盖摘要：`计划成本 成本中心X(类别) 覆盖金额|时间 值`。"""
         label = self._plan_cost_label(entry.category)
         head = self._plan_cost_head(entry.cost_center, entry.category)
-        return f"{head} 新增{label} {format(float(entry.amount), '.2f')}"
+        return f"{head} 覆盖{label} {format(float(entry.amount), '.2f')}"
 
     # ------------------------------------------------------------------ #
     # 复用创建侧 open/save
