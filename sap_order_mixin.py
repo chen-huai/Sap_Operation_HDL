@@ -26,6 +26,7 @@ from auto_updater.config_constants import CURRENT_VERSION
 from auto_updater import AutoUpdater, UI_AVAILABLE
 from sap import (
     DataBEntry,
+    ItemAddInfo,
     OrderData,
     OrderEditService,
     OrderItemData,
@@ -36,7 +37,6 @@ from sap import (
     SapConfig,
     SapResult,
     SapSession,
-    SubEditEntry,
 )
 from runtime_globals import configContent
 
@@ -301,22 +301,6 @@ class SapOrderMixin:
 
         return data_b_entries, plan_cost_entries_by_item
 
-    def _build_sub_edit_entries(self, order_row, sub_df):
-        """从 sub 表读取编辑专用新列，构建 SubEditEntry 列表。
-
-        仅承载创建流程未覆盖的 Sub Site / Sub Site Transfer Price；
-        其余 sub 字段仍由 _build_sub_entries_from_dataframe 产出，保持与创建一致口径。
-        """
-        order_sub_df = self._filter_related_rows(sub_df, order_row)
-        entries: list[SubEditEntry] = []
-        for _, sub_row in order_sub_df.iterrows():
-            entries.append(SubEditEntry(
-                item=self._excel_str(sub_row.get('item')),
-                sub_site=self._excel_str(sub_row.get('Sub Site')),
-                transfer_price=self._excel_float(sub_row.get('Sub Site Transfer Price')),
-            ))
-        return entries
-
     def _append_step_result(self, step_name, step_result):
         """把单个 SAP 步骤结果渲染到 textBrowser，按严重度区分颜色（创建/编辑两流程共用）。
 
@@ -352,7 +336,6 @@ class SapOrderMixin:
         config,
         data_b_entries,
         plan_cost_entries_by_item,
-        sub_edit_entries,
         order_no,
         flow_options,
         sap_session,
@@ -401,40 +384,72 @@ class SapOrderMixin:
             remarks.append(f"Header:{header_result.message}" if header_result.message else "Header")
             _report_step('Header 编辑', header_result)
 
-        # Item 编辑（va02Check）。
+        # Item 编辑（va02Check）：收集新增明细(added)，供落库后建立 ODM→SAP 号映射。
+        item_no_map: dict[str, str] = {}
+        added: list[ItemAddInfo] = []
+        item_ok = True
         if flow_options.get('va02Check'):
             item_diffs: list[str] = []
-            item_result = service.edit_items(order, item_diffs)
+            item_result = service.edit_items(order, item_diffs, added_out=added)
+            item_ok = item_result.success
             sap_amount_vat = item_result.sap_amount_vat or sap_amount_vat
             remarks.append(f"Item:{item_result.message}" if item_result.message else "Item")
             _report_step('Item 编辑', item_result)
 
-        # Plan Cost 编辑（planCostCheck）：按 item 号匹配 SAP 实际行（编号可能与 ODM 不同），
-        # SAP 无对应 item 则在事务层成功跳过。
+        # 有 item 新增 → 先重读概览建立 ODM→SAP 号映射，供 Plan Cost 定位（不 save）。
+        if item_ok and added:
+            item_no_map = service.build_item_no_mapping(added)
+
+        # Plan Cost 编辑（planCostCheck）：按（映射后）item 号在概览页实时定位物理行——
+        # 编号可能与 ODM 不同、SAP 也可能重排，故每次重读匹配，绝不用写入时的行号。
         if flow_options.get('planCostCheck'):
             for item in order.items:
                 plan_cost_entries = plan_cost_entries_by_item.get(item.item)
                 if not plan_cost_entries:
                     continue
                 pc_diffs: list[str] = []
-                plan_result = service.edit_plan_cost(plan_cost_entries, pc_diffs, target_item=item.item)
+                target_item = item_no_map.get(item.item, item.item)
+                plan_result = service.edit_plan_cost(plan_cost_entries, pc_diffs, target_item=target_item)
                 remarks.append(
                     f"Plan Cost {item.item}:{plan_result.message}"
                     if plan_result.message else f"Plan Cost {item.item}"
                 )
                 _report_step('Plan Cost %s' % item.item, plan_result)
 
-        # Data B 编辑（labCostCheck）。
-        if flow_options.get('labCostCheck') and data_b_entries:
+        # Data B 前保存：仅当有 item 新增且本次写 Data B 时——新 item 须落盘（否则引用报错），
+        # 且改号 item 的真实号仅落盘后才由 SAP 分配，保存 + 重开后重建映射拿到真实号供 POSNR 使用。
+        need_data_b = bool(flow_options.get('labCostCheck') and data_b_entries)
+        if item_ok and added and need_data_b:
+            save_before_db = service.save('VA02 Edit - Before Data B')
+            _report_step('Data B 前保存', save_before_db)
+            if not save_before_db.success:
+                remarks.append(f"Data B 前保存:{save_before_db.message}")
+                self._write_edit_log(
+                    log_file, log_data_path, index, order_no, remarks, sap_amount_vat
+                )
+                return
+            reopen = service.open_order(order_no)
+            order_no = reopen.order_no or order_no
+            _report_step('重开订单(号映射)', reopen)
+            if not reopen.success:
+                remarks.append(f"重开订单:{reopen.message}")
+                self._write_edit_log(
+                    log_file, log_data_path, index, order_no, remarks, sap_amount_vat
+                )
+                return
+            item_no_map = service.build_item_no_mapping(added)
+
+        # Data B 编辑（labCostCheck）：POSNR 用映射后的真实号（映射为空时回退 ODM 号，绝不写空）。
+        if need_data_b:
             db_diffs: list[str] = []
             data_b_result = service.edit_data_b(
-                data_b_entries, sub_edit_entries, order, db_diffs,
+                data_b_entries, order, db_diffs, item_no_map=item_no_map,
             )
             remarks.append(f"Data B:{data_b_result.message}" if data_b_result.message else "Data B")
             _report_step('Data B 编辑', data_b_result)
 
-        # 订单价值(AUFTRAGSWERT) 独立步骤：Σ SAP item 未税净值 × 汇率，与 Data B 门控解耦。
-        # 有 item 即重算回填（幂等，仅差异才写），并自愈历史双重汇率脏值。
+        # 订单价值(AUFTRAGSWERT)：Σ SAP item 未税净值 × 汇率，有 item 即幂等重算回填，
+        # 并自愈历史双重汇率脏值。
         if order.items:
             ov_diffs: list[str] = []
             order_value_result = service.edit_order_value(order, ov_diffs)
@@ -444,7 +459,7 @@ class SapOrderMixin:
             )
             _report_step('订单价值编辑', order_value_result)
 
-        # 保存（saveCheck）。
+        # 最终保存（saveCheck）。
         if flow_options.get('saveCheck'):
             save_result = service.save('VA02 Edit')
             remarks.append(f"Save:{save_result.message}" if save_result.message else "Save")
@@ -645,10 +660,9 @@ class SapOrderMixin:
                 # Excel 会混排"有号=编辑 / 无号=创建"两类行；本分支只接管有号行，无号行落回下方原创建逻辑（行为不变）。
                 excel_order_no = self._excel_str(order_row.get('Order Number'))
                 if excel_order_no:
-                    sub_edit_entries = self._build_sub_edit_entries(order_row, sub_df)
                     self._edit_order_row(
                         index, order_row, order, config,
-                        data_b_entries, plan_cost_entries_by_item, sub_edit_entries,
+                        data_b_entries, plan_cost_entries_by_item,
                         excel_order_no, flow_options, sap_session, log_file, log_data_path,
                     )
                     continue

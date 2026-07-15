@@ -172,19 +172,23 @@ class PlanCostEntry:
 
 
 @dataclass(slots=True)
-class SubEditEntry:
-    """VA02 编辑专用：承载 sub 表中创建流程未覆盖的新列。
+class ItemAddInfo:
+    """VA02 编辑专用：一条新增 item 的回读明细，供 item 号映射。
 
-    - item: 关联 SAP item 号。
-    - sub_site: Sub Site（执行站点），创建流程未写，编辑流程新增。
-    - transfer_price: Sub Site Transfer Price（站点转移价），创建流程未写，编辑流程新增。
+    编辑订单时若 item 发生新增（item+物料双键在 SAP 未命中），需在中途保存后
+    重进订单读回 SAP 实际号，建立 ODM→SAP 号映射，供下游 plan cost / data b 定位。
 
-    控件 ID 与所属页签待 SAP 录制后校正（见 order_edit.py 中 TODO）。
+    - odm_item: ODM 表原 item 号（下游 entries 仍以此为键）。
+    - material: 物料号（save+open 后按物料匹配 SAP 概览行）。
+    - amount: 概览净值文本（同物料多条新增时的消歧兜底）。
+    - auto_numbered: write_item_no=False（ODM 号已存在于 SAP，SAP 自动改号）→
+                     ODM 号 ≠ SAP 号，需回读映射；False 时 ODM 号即 SAP 号，恒等映射。
     """
 
-    item: str = ""
-    sub_site: str = ""
-    transfer_price: float = 0.0
+    odm_item: str
+    material: str
+    amount: str = ""
+    auto_numbered: bool = False
 
 
 @dataclass(slots=True)

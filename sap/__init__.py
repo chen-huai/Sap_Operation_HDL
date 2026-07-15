@@ -10,6 +10,7 @@ from sap.models import (
     CostOptions,
     DataBEntry,
     HourData,
+    ItemAddInfo,
     OrderData,
     OrderItemData,
     PartnerOptions,
@@ -17,7 +18,6 @@ from sap.models import (
     RevenueData,
     SapConfig,
     SapResult,
-    SubEditEntry,
 )
 from sap.services.hour_service import HourService
 from sap.services.invoice_service import InvoiceService
@@ -31,6 +31,7 @@ __all__ = [
     "HourData",
     "HourService",
     "InvoiceService",
+    "ItemAddInfo",
     "OrderData",
     "OrderEditService",
     "OrderItemData",
@@ -41,5 +42,4 @@ __all__ = [
     "SapConfig",
     "SapResult",
     "SapSession",
-    "SubEditEntry",
 ]

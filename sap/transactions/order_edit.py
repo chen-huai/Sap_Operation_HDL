@@ -18,12 +18,12 @@ from __future__ import annotations
 from sap.exceptions import SapUiError
 from sap.models import (
     DataBEntry,
+    ItemAddInfo,
     OrderData,
     OrderItemData,
     PlanCostEntry,
     SapConfig,
     SapResult,
-    SubEditEntry,
 )
 from sap.session import SapSession
 from sap.transactions.order import OrderTransaction
@@ -377,13 +377,23 @@ class OrderEditTransaction:
     # ------------------------------------------------------------------ #
     # item 编辑
     # ------------------------------------------------------------------ #
-    def edit_items(self, order: OrderData, diffs: list[str]) -> SapResult:
+    def edit_items(
+        self,
+        order: OrderData,
+        diffs: list[str],
+        added_out: list[ItemAddInfo] | None = None,
+    ) -> SapResult:
         """按 item+物料 双键对比更新 item。
 
         规则（见 .claude/plan/va02_edit_items_match.md）：
             - item 与 物料 均一致 → 仅更新金额（绝不改写物料，已落盘行物料只读会报错）；
             - item 或 物料 有一个不同 → 新增一条；
             - SAP 有、ODM 表无 → 提示并记 log，不删不改。
+
+        Args:
+            added_out: 若传入，则把本次发生新增的 item 明细（ItemAddInfo）原地追加，
+                供调用方 save+open 后 build_item_no_mapping 建立 ODM→SAP 号映射
+                （见 .claude/plan/va02_edit_item_add_midsave.md）。
 
         Returns:
             SapResult: message 含 item 差异/提示摘要，sap_amount_vat 含金额加和文本。
@@ -399,32 +409,66 @@ class OrderEditTransaction:
 
             existing = self._read_existing_item_rows()  # [(物理 row, item_no, material, 金额)]
             existing_item_nos = {item_no for _, item_no, _, _ in existing if item_no}
-            matched_rows: set[int] = set()
-            next_row = len(existing)
-            sap_amount_total = 0.0
-            sap_amount_text = ""
 
+            # 分两批处理，规避"新增回车后 SAP 按 POSNR 重排导致行号失效"：
+            #   ① 命中项：改金额/长文本，POSNR 不变、不触发重排，行号稳定；
+            #   ② 新增项：每加一条 SAP 都会重排，故回车后必须重读概览重新定位当前行，
+            #      绝不能沿用写入时的追加行号（否则金额/文本写到别的 item 上）。
+            matched: list[tuple[int, "OrderItemData"]] = []
+            new_items: list["OrderItemData"] = []
+            matched_rows: set[int] = set()
             for item in items:
                 row = self._match_item_row(existing, item, matched_rows)
                 if row is not None:
-                    # item + 物料 一致 → 进详情逐字段比对金额/长文本，仅差异才写（不碰物料）。
-                    # 长文本(Item Group Description)只能在详情页读写，故命中行一律进详情比对。
                     matched_rows.add(row)
-                    amount_text, summary = self._enter_item_and_write_condition(row, item, result, is_new=False)
+                    matched.append((row, item))
                 else:
-                    # item 或 物料 不一致 → 新增一条；item 号已存在则让 SAP 自动分配，避免重号。
-                    write_item_no = not (self._norm(item.item) and self._norm(item.item) in existing_item_nos)
-                    self._base._write_item_row(next_row, item, write_item_no=write_item_no)
-                    self.session.send_vkey(0)
-                    amount_text, summary = self._enter_item_and_write_condition(next_row, item, result, is_new=True)
-                    next_row += 1
+                    new_items.append(item)
 
-                if summary:  # 仅有更新/新增的 item 才输出，无变化静默
+            sap_amount_total = 0.0
+            sap_amount_text = ""
+
+            # 批次一：命中项（进详情逐字段比对金额/长文本，仅差异才写，绝不碰只读物料）。
+            for row, item in matched:
+                amount_text, summary = self._enter_item_and_write_condition(row, item, result, is_new=False)
+                if summary:
                     diffs.append(summary)
                 sap_amount_text = amount_text or sap_amount_text
                 sap_amount_total += self._base._parse_amount(amount_text)
 
-            # SAP 有但 ODM 表格没有的行 → 每行一条提示，不删不改。
+            # 批次二：新增项。写入末尾行 → 回车（SAP 重排）→ 重读定位当前行 → 写金额/文本。
+            known_item_nos = set(existing_item_nos)
+            used_rows = set(matched_rows)
+            for item in new_items:
+                # item 号已存在则让 SAP 自动分配（write_item_no=False），避免重号。
+                write_item_no = not (self._norm(item.item) and self._norm(item.item) in known_item_nos)
+                append_row = len(self._read_existing_item_rows())
+                self._base._write_item_row(append_row, item, write_item_no=write_item_no)
+                self.session.send_vkey(0)
+                actual_row = self._relocate_new_item_row(
+                    item, write_item_no=write_item_no,
+                    known_item_nos=known_item_nos, used_rows=used_rows,
+                )
+                if actual_row is None:
+                    actual_row = append_row  # 兜底：重读定位失败时退回写入行
+                amount_text, summary = self._enter_item_and_write_condition(actual_row, item, result, is_new=True)
+                used_rows.add(actual_row)
+                # 记录新增明细：write_item_no=False 时 SAP 自动改号，需 save+open 后回读映射。
+                if added_out is not None:
+                    added_out.append(ItemAddInfo(
+                        odm_item=self._norm(item.item),
+                        material=self._norm(item.material_code),
+                        amount=self._norm(amount_text),
+                        auto_numbered=not write_item_no,
+                    ))
+                # 重排后刷新已知号集合，供下一条新增的号冲突判定与定位。
+                known_item_nos = {n for _, n, _, _ in self._read_existing_item_rows() if n}
+                if summary:
+                    diffs.append(summary)
+                sap_amount_text = amount_text or sap_amount_text
+                sap_amount_total += self._base._parse_amount(amount_text)
+
+            # SAP 有但 ODM 表格没有的行 → 每行一条提示，不删不改（用初始概览与 matched_rows，二者同基准一致）。
             for row, item_no, material, amount in existing:
                 if row not in matched_rows:
                     diffs.append(
@@ -474,6 +518,31 @@ class OrderEditTransaction:
                 return row
         return None
 
+    def _relocate_new_item_row(
+        self, item: OrderItemData, *, write_item_no: bool, known_item_nos: set[str], used_rows: set[int]
+    ) -> int | None:
+        """回车重排后重读概览，定位刚新增 item 的当前物理行。
+
+        SAP VA02 概览页在回车确认后按 POSNR 升序重排，写入时的追加行号随即失效，
+        必须按 item 身份重新定位：
+            - write_item_no=True：写了 POSNR，新行 item 号 == ODM 号，按号定位；
+            - write_item_no=False：SAP 自动改号，按"物料一致 且 item 号此前未出现"定位。
+        找不到返回 None（调用方退回写入行兜底）。
+        """
+        rows = self._read_existing_item_rows()
+        target_item = self._norm(item.item)
+        target_material = self._norm(item.material_code)
+        if write_item_no and target_item:
+            for row, item_no, _material, _amount in rows:
+                if row not in used_rows and self._norm(item_no) == target_item:
+                    return row
+        for row, item_no, material, _amount in rows:
+            if row in used_rows:
+                continue
+            if self._norm(material) == target_material and self._norm(item_no) not in known_item_nos:
+                return row
+        return None
+
     def _find_item_physical_row(self, target_item) -> int | None:
         """在 SAP item 概览页找 item 号等于 target_item 的物理 row；找不到返回 None。
 
@@ -486,6 +555,76 @@ class OrderEditTransaction:
             if self._norm(item_no) == target:
                 return row
         return None
+
+    def build_item_no_mapping(self, added: list[ItemAddInfo]) -> dict[str, str]:
+        """中途 save+open 后，为新增 item 建立 ODM→SAP 号映射。
+
+        调用前提：调用方已 save 使新增 item 落库、并重进订单（/NVA02）。此处读回
+        当前 item 概览页，把每个新增项关联到其 SAP 实际号：
+            - auto_numbered=False：ODM 号即 SAP 号 → 恒等映射，并预占该 SAP 行避免被抢；
+            - auto_numbered=True：SAP 自动改号 → 按物料匹配、金额兜底、出现顺序兜底定位。
+
+        无匹配的新增项退回恒等映射并记 log（下游 plan cost 会 warning 跳过，不静默）。
+
+        Returns:
+            dict[str, str]: {ODM item 号: SAP 实际 item 号}；仅含新增项，未新增 item 的
+                下游定位直接用原号（调用方 .get(odm, odm) 兜底）。
+        """
+        mapping: dict[str, str] = {}
+        self._base._ensure_item_overview()
+        existing = self._read_existing_item_rows()  # [(row, item_no, material, amount)]
+        used_rows: set[int] = set()
+
+        # 先处理恒等映射项：预占其 SAP 行，防止同物料的改号新增项误抢。
+        identity_items = {info.odm_item for info in added if not info.auto_numbered and info.odm_item}
+        for row, item_no, _material, _amount in existing:
+            if self._norm(item_no) in identity_items:
+                used_rows.add(row)
+
+        for info in added:
+            if not info.auto_numbered:
+                if info.odm_item:
+                    mapping[info.odm_item] = info.odm_item
+                continue
+            sap_item_no = self._match_added_row(existing, info, used_rows)
+            if sap_item_no is None:
+                # 无法定位改号后的行：退回恒等，交由下游 warning 跳过（不静默丢失）。
+                mapping[info.odm_item] = info.odm_item
+            else:
+                mapping[info.odm_item] = sap_item_no
+        return mapping
+
+    def _match_added_row(
+        self, existing: list[tuple[int, str, str, str]], info: ItemAddInfo, used_rows: set[int]
+    ) -> str | None:
+        """为一个改号新增项在概览行中定位 SAP 实际号：物料匹配→金额兜底→顺序兜底。
+
+        命中后把该物理行标记为已用（同物料多条新增按出现顺序逐一消费），返回 SAP item 号；
+        物料无任何未占用行匹配时返回 None。
+        """
+        material = self._norm(info.material)
+        # 仅接受 item 号非空的行——空号行（新增行号尚未渲染等）不能作为映射目标，否则会把
+        # ODM 号映射成空串，导致下游 Data B 的 POSNR/ZPOSITION 被写空。
+        candidates = [
+            (row, item_no, amount)
+            for row, item_no, mat, amount in existing
+            if row not in used_rows and self._norm(mat) == material and self._norm(item_no)
+        ]
+        if not candidates:
+            return None
+
+        # 金额兜底：同物料多条时优先净值一致的行。
+        if info.amount:
+            want = self._norm_amount(info.amount)
+            for row, item_no, amount in candidates:
+                if self._norm_amount(amount) == want:
+                    used_rows.add(row)
+                    return item_no
+
+        # 顺序兜底：取首个未占用的同物料行。
+        row, item_no, _amount = candidates[0]
+        used_rows.add(row)
+        return item_no
 
     # T\09 item 长文本编辑器控件（仅文本，语言不动——编辑屏语言下拉不可改）。
     _ITEM_LONG_TEXT_ID = (
@@ -605,14 +744,18 @@ class OrderEditTransaction:
     def edit_data_b(
         self,
         entries: list[DataBEntry],
-        sub_edit_entries: list[SubEditEntry],
         order: OrderData,
         diffs: list[str],
+        item_no_map: dict[str, str] | None = None,
     ) -> SapResult:
         """对比并更新 Data B（人工成本）行；口径与创建 fill_lab_cost_entries 一致。
 
         命中行（按物理 row）对比执行部门/费率成本中心/固定价格；行不足时按创建写法补写。
-        新列 Sub Site / Sub Site Transfer Price 控件 ID 待录制校正（见 TODO）。
+
+        Args:
+            item_no_map: 中途 save+open 后建立的 ODM→SAP item 号映射；新增被 SAP 改号的
+                item 需用真实号写 POSNR/ZPOSITION，否则指向错误 item
+                （见 .claude/plan/va02_edit_item_add_midsave.md）。未传或未命中时用原号。
 
         Note:
             订单价值(AUFTRAGSWERT) 已从本方法剥离，改由 edit_order_value() 独立步骤对比更新。
@@ -622,12 +765,17 @@ class OrderEditTransaction:
             self.session.press("wnd[0]/usr/subSUBSCREEN_HEADER:SAPMV45A:4021/btnBT_HEAD")
             self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14")
 
-            sub_site_by_item = {e.item: e for e in sub_edit_entries}
             for row, entry in enumerate(entries):
                 performer = (entry.performer_cost_center or "").strip()
                 rate = (entry.rate_cost_center or performer).strip()
                 raw_item = (entry.item or "").strip()
                 item_no = raw_item.split(";", 1)[0].strip() if raw_item else ""
+                # 新增改号 item：用 save+open 回读的 SAP 实际号定位，避免 POSNR 指向错误 item。
+                # 映射值为空时保留原 ODM 号——绝不因映射缺失把 POSNR/ZPOSITION 写成空。
+                if item_no and item_no_map:
+                    mapped = item_no_map.get(item_no)
+                    if mapped:
+                        item_no = mapped
                 if not performer and not rate:
                     continue
 
@@ -665,13 +813,6 @@ class OrderEditTransaction:
                     diffs=diffs,
                     amount=True,
                 )
-
-                # TODO(录制校正): Sub Site / Sub Site Transfer Price 控件 ID 与所属页签。
-                # sub_edit = sub_site_by_item.get(item_no)
-                # if sub_edit:
-                #     self._compare_and_set(<sub_site_id>, sub_edit.sub_site, field=..., diffs=diffs)
-                #     self._compare_and_set(<transfer_price_id>, sub_edit.transfer_price,
-                #                           field=..., diffs=diffs, amount=True)
         except Exception as exc:
             return SapResult.fail(f"Data B 编辑失败，{exc}", step="edit_data_b")
         result.message = "；".join(diffs) if diffs else "Data B 无差异"
@@ -724,8 +865,8 @@ class OrderEditTransaction:
     ) -> SapResult:
         """按 成本中心+类别 匹配更新指定 SAP item 的计划成本（每条 entry 一行汇总）。
 
-        先按 item 号在 SAP item 概览页定位物理行（ODM 与 SAP item 编号可能不同），
-        再对该 item 打开计划成本编辑器。SAP 不存在该 item → 不开编辑器、成功跳过。
+        先按 item 号在 SAP item 概览页实时定位物理行（ODM 与 SAP 编号可能不同、SAP 也可能
+        重排，故每次重读匹配，不用写入时的行号）。SAP 不存在该 item → 不开编辑器、成功跳过。
 
         规则（同 item 编辑）：
             - 成本中心 与 类别 均一致 → 仅更新不同的金额/时间(MENGE)，不碰类型/中心/类别；

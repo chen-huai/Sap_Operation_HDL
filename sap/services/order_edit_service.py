@@ -6,11 +6,11 @@
 
 from sap.models import (
     DataBEntry,
+    ItemAddInfo,
     OrderData,
     PlanCostEntry,
     SapConfig,
     SapResult,
-    SubEditEntry,
 )
 from sap.session import SapSession
 from sap.transactions.order_edit import OrderEditTransaction
@@ -31,19 +31,28 @@ class OrderEditService:
         """对比并更新订单抬头字段。"""
         return self.transaction.edit_header(order, diffs)
 
-    def edit_items(self, order: OrderData, diffs: list[str]) -> SapResult:
-        """对比并更新 item 行。"""
-        return self.transaction.edit_items(order, diffs)
+    def edit_items(
+        self,
+        order: OrderData,
+        diffs: list[str],
+        added_out: list[ItemAddInfo] | None = None,
+    ) -> SapResult:
+        """对比并更新 item 行；发生新增时明细写入 added_out 供号映射。"""
+        return self.transaction.edit_items(order, diffs, added_out)
+
+    def build_item_no_mapping(self, added: list[ItemAddInfo]) -> dict[str, str]:
+        """中途 save+open 后建立新增 item 的 ODM→SAP 号映射。"""
+        return self.transaction.build_item_no_mapping(added)
 
     def edit_data_b(
         self,
         entries: list[DataBEntry],
-        sub_edit_entries: list[SubEditEntry],
         order: OrderData,
         diffs: list[str],
+        item_no_map: dict[str, str] | None = None,
     ) -> SapResult:
-        """对比并更新 Data B 行。"""
-        return self.transaction.edit_data_b(entries, sub_edit_entries, order, diffs)
+        """对比并更新 Data B 行；item_no_map 提供新增改号 item 的真实号。"""
+        return self.transaction.edit_data_b(entries, order, diffs, item_no_map)
 
     def edit_order_value(self, order: OrderData, diffs: list[str]) -> SapResult:
         """对比并更新订单价值(AUFTRAGSWERT)：Σ SAP item 未税净值 × 汇率。"""
@@ -56,7 +65,7 @@ class OrderEditService:
         *,
         target_item: str,
     ) -> SapResult:
-        """对比并更新指定 SAP item 的计划成本（按 item 号定位，SAP 无此 item 则跳过）。"""
+        """对比并更新指定 SAP item 的计划成本（按 item 号实时定位，SAP 无此 item 则跳过）。"""
         return self.transaction.edit_plan_cost(entries, diffs, target_item=target_item)
 
     def save(self, info: str) -> SapResult:
