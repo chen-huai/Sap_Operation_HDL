@@ -32,6 +32,9 @@ from sap.transactions.order import OrderTransaction
 class OrderEditTransaction:
     """封装 VA02 订单字段对比更新操作。"""
 
+    # 售达方/付款方联动重算弹窗排空的最大轮数（死循环兜底，见 _confirm_sold_to_dialogs）。
+    _MAX_DIALOG_ROUNDS = 8
+
     def __init__(self, session: SapSession, config: SapConfig):
         """基于共享会话初始化；持有 OrderTransaction 复用 open/save/控件 ID。"""
         self.session = session
@@ -154,24 +157,30 @@ class OrderEditTransaction:
         self.session.set_text(sold_to_id, new_value)
         self.session.focus(sold_to_id, len(new_value))
         self.session.send_vkey(0)
-        self._confirm_sold_to_dialogs(order)
+        self._confirm_sold_to_dialogs()
         diffs.append(f"售达方(SAP No):{self._norm(current)}→{new_value}")
 
-    def _confirm_sold_to_dialogs(self, order: OrderData) -> None:
-        """确认改售达方后 SAP 弹出的联动重算弹窗（按录制序列，容错执行）。
+    def _confirm_sold_to_dialogs(self) -> None:
+        """动态排空改售达方后 SAP 弹出的联动重算弹窗。
 
-        固定序列：wnd[1] 回车 → btnSPOP-VAROPTION1 按两次 → wnd[1] 回车；
-        随后按当前订单 item 行数逐行补发回车（每条 item 一次，对应录制中
-        "因 item 有两条而增加的两次 sendVKey 0"）。缺窗时容错跳过。
+        弹窗数量不是 item 行数的函数，而是随本次变更连带触发的重算种类而变：
+        付款方联动（固定）+ 是否改汇率（条件性，如汇率变会多一个确认框）+ 是否重定价。
+        故不再按固定次数/item 数硬发回车，改为逐轮排空：
+
+            每轮 → 选项框 btnSPOP-VAROPTION1 存在则按按钮（禁止用回车替代，
+                    否则会静默选中默认项、选错还不报错）；
+                  → 否则普通 wnd[1] 确认框回车；
+                  → 都没有则结束。
+
+        缺窗时 _try_press/try_send_vkey 幂等返回 False，天然给出退出信号；
+        再以 _MAX_DIALOG_ROUNDS 兜底，杜绝异常弹窗导致死循环。
         """
-        self.session.try_send_vkey(0, window_id="wnd[1]")
-        self._try_press("wnd[1]/usr/btnSPOP-VAROPTION1")
-        self._try_press("wnd[1]/usr/btnSPOP-VAROPTION1")
-        self.session.try_send_vkey(0, window_id="wnd[1]")
-
-        item_count = sum(1 for item in order.items if item.material_code) or 1
-        for _ in range(item_count):
-            self.session.try_send_vkey(0, window_id="wnd[1]")
+        for _ in range(self._MAX_DIALOG_ROUNDS):
+            if self._try_press("wnd[1]/usr/btnSPOP-VAROPTION1"):
+                continue
+            if self.session.try_send_vkey(0, window_id="wnd[1]"):
+                continue
+            return
 
     def _try_press(self, element_id: str) -> bool:
         """容错点击按钮：控件不存在时返回 False 而非抛错（条件弹窗按钮专用）。"""
