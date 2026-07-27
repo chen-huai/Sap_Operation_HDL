@@ -439,7 +439,9 @@ class OrderEditTransaction:
 
             # 批次一：命中项（进详情逐字段比对金额/长文本，仅差异才写，绝不碰只读物料）。
             for row, item in matched:
-                amount_text, summary = self._enter_item_and_write_condition(row, item, result, is_new=False)
+                amount_text, summary = self._enter_item_and_write_condition(
+                    row, item, result, is_new=False, currency=order.currency_type
+                )
                 if summary:
                     diffs.append(summary)
                 sap_amount_text = amount_text or sap_amount_text
@@ -649,12 +651,15 @@ class OrderEditTransaction:
         result: SapResult,
         *,
         is_new: bool,
+        currency: str | None = None,
     ) -> tuple[str, str]:
-        """进入 item 详情写金额/长文本，返回 (概览权威净值, 单条 item 汇总文本)。
+        """进入 item 详情写金额/币种/长文本，返回 (概览权威净值, 单条 item 汇总文本)。
 
         新增 item 与已存在 item 的条件表布局不同，分别处理：
-            - is_new：完全沿用创建侧新增步骤（物料格进详情、价格条件 [3,5] 直接写）；
-            - 已存在：编辑对比（数量格进详情、价格条件 [3,1]，仅差异才写）。
+            - is_new：完全沿用创建侧新增步骤（物料格进详情、价格条件 [3,5] 直接写，
+              币种自动继承单据币种，无需写）；
+            - 已存在：编辑对比（数量格进详情、价格条件 [3,1]，仅差异才写）；单据币种变了，
+              item 条件币种 KOEIN[4,1] 也须随抬头同步（currency=order.currency_type）。
         """
         if is_new:
             # 新增 item：与创建侧新增步骤一致（复用 _base 的条件/长文本写法，价格条件 [3,5]）。
@@ -669,14 +674,27 @@ class OrderEditTransaction:
             # KBETR[3,1]（创建侧的 [3,5] 在编辑屏是空行/只读行，写入会抛 Property '.text' can not be set）。
             self.session.focus(OrderTransaction._quantity_id(row), 16)
             self.session.send_vkey(2)
-            condition_id = (
+            condition_base = (
                 "wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\06/"
                 "ssubSUBSCREEN_BODY:SAPLV69A:6201/tblSAPLV69ATCTRL_KONDITIONEN/"
-                "txtKOMV-KBETR[3,1]"
             )
+            condition_id = f"{condition_base}txtKOMV-KBETR[3,1]"
             self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\06")
             amount_diff = self._diff_set(condition_id, item.revenue, amount=True)
-            if amount_diff and amount_diff[0]:
+            # 单据币种变了，同一条件行的币种列 KOEIN[4,1] 也随抬头同步（仅差异才写）。
+            # 仅在能读到现有币种值时才对比：已定价 item 的 KOEIN 恒有币种，读到空串
+            # 说明控件异常/无条件行，此时不盲写（口径同 _edit_sold_to 读不到即跳过）。
+            currency_diff = None
+            if currency is not None:
+                currency_id = f"{condition_base}ctxtRV61A-KOEIN[4,1]"
+                try:
+                    current_currency = self._norm(self.session.read_text(currency_id))
+                except SapUiError:
+                    current_currency = ""
+                if current_currency:
+                    currency_diff = self._diff_set(currency_id, currency)
+            # 金额或币种任一变化才回车提交整屏（只改币种时金额数字不变，仍须提交）。
+            if (amount_diff and amount_diff[0]) or (currency_diff and currency_diff[0]):
                 self.session.focus(condition_id, 16)
                 self.session.send_vkey(0)
 
@@ -687,7 +705,7 @@ class OrderEditTransaction:
                 self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\09")
                 text_diff = self._diff_set(self._ITEM_LONG_TEXT_ID, item.long_text)
 
-            summary = self._matched_item_summary(item, amount_diff, text_diff)
+            summary = self._matched_item_summary(item, amount_diff, text_diff, currency_diff)
 
         # 返回概览页后，从同一行第5格（NETWR）读取权威净值金额；条件页 KBETR 对部分单读不到。
         self.session.press("wnd[0]/tbar[0]/btn[3]")
@@ -719,16 +737,19 @@ class OrderEditTransaction:
     def _matched_item_summary(
         self, item: OrderItemData, amount_diff: tuple[bool, str, str] | None,
         text_diff: tuple[bool, str, str] | None,
+        currency_diff: tuple[bool, str, str] | None = None,
     ) -> str:
         """命中 item 的单行汇总：只列真正变化的字段；无变化返回空串(调用方不输出)。
 
-        例：`item 10 物料 ABC 金额 500 → 400.00`。
+        例：`item 10 物料 ABC 金额 500 → 400.00，币种 USD → CNY`。
         """
         parts: list[str] = []
         if amount_diff is None:
             parts.append("金额读取失败")
         elif amount_diff[0]:
             parts.append(f"金额 {amount_diff[1]} → {amount_diff[2]}")
+        if currency_diff and currency_diff[0]:
+            parts.append(f"币种 {currency_diff[1]} → {currency_diff[2]}")
         if item.long_text:
             if text_diff is None:
                 parts.append("文本读取失败")
