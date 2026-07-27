@@ -416,10 +416,14 @@ class SapOrderMixin:
                 )
                 _report_step('Plan Cost %s' % item.item, plan_result)
 
-        # Data B 前保存：仅当有 item 新增且本次写 Data B 时——新 item 须落盘（否则引用报错），
+        # Data B 同步门控：勾选 labCostCheck 即执行（labCostCheck→编辑 Data B），与 Excel 是否
+        # 有 Data B 行无关——Excel 整理后无某条须删对应 SAP 行，Data B 全空须删 SAP 全部行。
+        # 旧版误用 `and data_b_entries` 短路，导致 Excel 清空时 edit_data_b 根本不被调用、删不掉原有行。
+        data_b_enabled = bool(flow_options.get('labCostCheck'))
+        # Data B 前保存：仅当有 item 新增且本次确有 Data B 行要写时——新 item 须落盘（否则引用报错），
         # 且改号 item 的真实号仅落盘后才由 SAP 分配，保存 + 重开后重建映射拿到真实号供 POSNR 使用。
-        need_data_b = bool(flow_options.get('labCostCheck') and data_b_entries)
-        if item_ok and added and need_data_b:
+        # 纯删除（Excel Data B 为空）不引用新 item，无需前保存。
+        if item_ok and added and data_b_enabled and data_b_entries:
             save_before_db = service.save('VA02 Edit - Before Data B')
             _report_step('Data B 前保存', save_before_db)
             if not save_before_db.success:
@@ -439,8 +443,9 @@ class SapOrderMixin:
                 return
             item_no_map = service.build_item_no_mapping(added)
 
-        # Data B 编辑（labCostCheck）：POSNR 用映射后的真实号（映射为空时回退 ODM 号，绝不写空）。
-        if need_data_b:
+        # Data B 编辑（labCostCheck）：写入 Excel 行 + 删除 Excel 无的多余行（含 Excel 全空 → 全删）。
+        # POSNR 用映射后的真实号（映射为空时回退 ODM 号，绝不写空）。
+        if data_b_enabled:
             db_diffs: list[str] = []
             data_b_result = service.edit_data_b(
                 data_b_entries, order, db_diffs, item_no_map=item_no_map,
