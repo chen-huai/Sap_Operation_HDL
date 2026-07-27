@@ -619,6 +619,19 @@ class SapOrderMixin:
                     log_file.to_excel(log_data_path, merge_cells=False, index=False)
                     continue
 
+                # Invoice Number 有值 = 该单已开票，无论是否有 Order Number 都不新建/编辑，直接跳过。
+                # 放在 Combine Id 之后、GUI 回填/确认弹窗/对象构建之前，避免对已开票单做任何无谓动作。
+                invoice_number = self._excel_str(order_row.get('Invoice Number'))
+                if invoice_number:
+                    skip_msg = 'Invoice Number 已有值（%s），跳过不新建/编辑' % invoice_number
+                    log_file.loc[index, 'Remark'] = skip_msg
+                    log_file.to_excel(log_data_path, merge_cells=False, index=False)
+                    self.textBrowser.append(
+                        "<font color='orange'>No.%s %s</font>" % (index + 1, skip_msg)
+                    )
+                    QApplication.processEvents()
+                    continue
+
                 # 将当前订单关键字段回填到 GUI 控件，便于用户实时跟踪正在处理的订单。
                 self._apply_order_row_to_gui(order_row)
 
