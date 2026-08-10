@@ -242,6 +242,21 @@ class OrderTransaction:
             self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14")
             for row, entry in enumerate(entries):
                 performer_cost_center = entry.performer_cost_center.strip()
+                kostl_id = (
+                    f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
+                    f"tblSAPMV45AZULEISTENDE/ctxtTABL-KOSTL[0,{row}]"
+                )
+
+                if entry.kostl_only:
+                    # config 强制成本中心行：只录执行部门，回车让 SAP 带出该行，
+                    # 不写 item 号 / 费率成本中心 / 固定价格。
+                    if not performer_cost_center:
+                        continue
+                    self.session.set_text(kostl_id, performer_cost_center)
+                    self.session.focus(kostl_id, len(performer_cost_center))
+                    self.session.send_vkey(0)
+                    continue
+
                 rate_cost_center = (entry.rate_cost_center or performer_cost_center).strip()
                 # 单条 Data B 只能对应一个 item，若上游传 "1000;3000" 这种多 item，
                 # 取第一个 ";" 之前的部分，保留 SAP POSNR 字段单值约束。
@@ -250,11 +265,7 @@ class OrderTransaction:
                 if not performer_cost_center and not rate_cost_center:
                     continue
                 # Data B 页签中同一行需要同时写执行部门、ZULEISTENDE/KOSTENSAETZE 双表 item 号、费率成本中心和固定价格。
-                self.session.set_text(
-                    f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
-                    f"tblSAPMV45AZULEISTENDE/ctxtTABL-KOSTL[0,{row}]",
-                    performer_cost_center,
-                )
+                self.session.set_text(kostl_id, performer_cost_center)
                 if item_no and order.sales_group != '240':
                     # ZULEISTENDE 表格 item 号写入；缺失和 sales_group 为 240 时跳过，由 SAP 默认行为兜底。
                     self.session.set_text(

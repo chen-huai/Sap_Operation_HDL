@@ -149,12 +149,16 @@ class DataBEntry:
     - amount: 固定价格（写入 TABD-FESTPREIS）。
     - item: 关联 SAP item 号（写入 TABD-POSNR）；为空时由 SAP 默认行为兜底；
             多 item（如 "1000;3000"）由下游裁剪取第一个。
+    - kostl_only: 强制成本中心行（来源 config `Data_B_Cost_Center`）。为 True 时
+            只写执行部门 TABL-KOSTL 一列，不写 item 号 / 费率成本中心 / 固定价格，
+            写后回车让 SAP 带出该行；此类行恒排在表格行之后。
     """
 
     performer_cost_center: str
     rate_cost_center: str
     amount: float
     item: str = ""
+    kostl_only: bool = False
 
 
 @dataclass(slots=True)

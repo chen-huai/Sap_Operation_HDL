@@ -235,12 +235,49 @@ class SapOrderMixin:
             revenue_cny=revenue,
         )
 
+    @staticmethod
+    def _forced_data_b_cost_centers():
+        """解析 config `Data_B_Cost_Center`（`;` 分隔）为强制录入的成本中心列表。
+
+        返回值保序去重，已剔除空白项；配置缺失或全空时返回空列表（等价于关闭该功能）。
+        """
+        raw = str(configContent.get('Data_B_Cost_Center', '') or '')
+        result = []
+        for cc in raw.split(';'):
+            cc = cc.strip()
+            if cc and cc not in result:
+                result.append(cc)
+        return result
+
+    def _append_forced_data_b_entries(self, data_b_entries):
+        """在表格行之后追加 config 强制成本中心行（原地修改 data_b_entries）。
+
+        去重口径：表格行已含相同执行部门成本中心则跳过，避免 SAP 出现重复行。
+        强制行只写执行部门列，故 rate/amount/item 留空，由 kostl_only 标记下游写入范围。
+        """
+        existing = {
+            (entry.performer_cost_center or '').strip()
+            for entry in data_b_entries
+        }
+        for cost_center in self._forced_data_b_cost_centers():
+            if cost_center in existing:
+                continue
+            existing.add(cost_center)
+            data_b_entries.append(DataBEntry(
+                performer_cost_center=cost_center,
+                rate_cost_center='',
+                amount=0.0,
+                item='',
+                kostl_only=True,
+            ))
+
     def _build_sub_entries_from_dataframe(self, order_row, sub_df):
         """从 sub 表构建 Data B 和 Plan Cost 的直接写入明细。
 
         Returns:
             tuple[list[DataBEntry], dict[str, list[PlanCostEntry]]]:
-              - Data B: 按 sub 表行级保留（每条 sub 行一条 DataBEntry）。
+              - Data B: 按 sub 表行级保留（每条 sub 行一条 DataBEntry），
+                末尾追加 config `Data_B_Cost_Center` 的强制成本中心行。
               - Plan Cost: 按 item 分组，每 item 一组 PlanCostEntry 列表。
 
         Plan Cost 聚合规则：
@@ -298,6 +335,9 @@ class SapOrderMixin:
                     category='T01AST',
                     amount=amount,
                 ))
+
+        # 强制成本中心行恒排在表格行之后，保证「entries 索引 = SAP 物理 row」不变量。
+        self._append_forced_data_b_entries(data_b_entries)
 
         return data_b_entries, plan_cost_entries_by_item
 

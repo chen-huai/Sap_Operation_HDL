@@ -799,8 +799,13 @@ class OrderEditTransaction:
             self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14")
             existing_rows = self._count_existing_data_b_rows(base)
 
+            # 表格行与 config 强制成本中心行分开处理：前者按行覆盖全部列，
+            # 后者只覆盖执行部门列，且恒排在表格行之后。
+            normal = [e for e in entries if not e.kostl_only]
+            forced = [e for e in entries if e.kostl_only]
+
             written = 0
-            for row, entry in enumerate(entries):
+            for row, entry in enumerate(normal):
                 performer = (entry.performer_cost_center or "").strip()
                 rate = (entry.rate_cost_center or performer).strip()
                 raw_item = (entry.item or "").strip()
@@ -814,7 +819,9 @@ class OrderEditTransaction:
                 if not performer and not rate:
                     continue
 
-                written += 1
+                # written 取"已写入的最大物理行 + 1"，跳过条目留下的空洞不会被后续
+                # 强制行或删除逻辑当成可占用的行。
+                written = row + 1
                 self._compare_and_set(
                     f"{base}/tblSAPMV45AZULEISTENDE/ctxtTABL-KOSTL[0,{row}]",
                     performer,
@@ -849,8 +856,13 @@ class OrderEditTransaction:
                     amount=True,
                 )
 
-            # Excel 没有的多余行（SAP 行数 > 写入行数）→ 末行往前删，避免删除后行号位移。
-            for row in range(existing_rows - 1, written - 1, -1):
+            # 表格行之后的尾部由强制成本中心行独占：先认领已匹配的前缀（幂等，不重复删建），
+            # 其余尾部行一律删除后重建，避免旧表格行的费率中心/固定价格残留在强制行上。
+            keep = self._count_matching_forced_rows(base, written, forced, existing_rows)
+            tail_start = written + keep
+
+            # 期望之外的多余行（SAP 行数 > 期望行数）→ 末行往前删，避免删除后行号位移。
+            for row in range(existing_rows - 1, tail_start - 1, -1):
                 try:
                     performer = (self.session.read_text(
                         f"{base}/tblSAPMV45AZULEISTENDE/ctxtTABL-KOSTL[0,{row}]"
@@ -858,7 +870,19 @@ class OrderEditTransaction:
                 except SapUiError:
                     performer = ""
                 self._delete_data_b_row(base, row)
-                diffs.append(f"Data B 行{row}(执行部门{performer})：Excel 无，已删除")
+                diffs.append(f"DataB[{row}](执行部门{performer}):期望外,已删除")
+
+            # 补写尚未落地的强制成本中心行。
+            for offset in range(keep, len(forced)):
+                row = written + offset
+                cost_center = (forced[offset].performer_cost_center or "").strip()
+                if not cost_center:
+                    continue
+                kostl_id = f"{base}/tblSAPMV45AZULEISTENDE/ctxtTABL-KOSTL[0,{row}]"
+                self.session.set_text(kostl_id, cost_center)
+                self.session.focus(kostl_id, len(cost_center))
+                self.session.send_vkey(0)
+                diffs.append(f"DataB[{row}]执行部门:强制成本中心 {cost_center} 已录入")
         except Exception as exc:
             return SapResult.fail(f"Data B 编辑失败，{exc}", step="edit_data_b")
         result.message = "；".join(diffs) if diffs else "Data B 无差异"
@@ -877,6 +901,37 @@ class OrderEditTransaction:
         self.session.focus(f"{kos}/ctxtTABD-KOSTL[0,{row}]", 0)
         self.session.press(f"{base}/btnTABLOESCH")
         self._try_press("wnd[1]/usr/btnSPOP-OPTION1")
+
+    def _count_matching_forced_rows(
+        self,
+        base: str,
+        start_row: int,
+        forced: list[DataBEntry],
+        existing_rows: int,
+    ) -> int:
+        """从 start_row 起，统计已与期望强制成本中心行逐行匹配的前缀长度。
+
+        匹配条件：执行部门相同，且固定价格为空/0（有金额说明该行是遗留的表格行，
+        必须删除重建，否则强制行上会残留旧金额）。一旦不匹配立即停止——后续行会被
+        整体截断重建，保留中间行会导致删除后行号错位。
+        """
+        keep = 0
+        while keep < len(forced) and start_row + keep < existing_rows:
+            row = start_row + keep
+            expected = (forced[keep].performer_cost_center or "").strip()
+            try:
+                kostl = (self.session.read_text(
+                    f"{base}/tblSAPMV45AZULEISTENDE/ctxtTABL-KOSTL[0,{row}]"
+                ) or "").strip()
+                festpreis = (self.session.read_text(
+                    f"{base}/tblSAPMV45AKOSTENSAETZE/txtTABD-FESTPREIS[5,{row}]"
+                ) or "").strip()
+            except SapUiError:
+                break
+            if kostl != expected or self._norm_amount(festpreis) not in ("", "0.00"):
+                break
+            keep += 1
+        return keep
 
     def _count_existing_data_b_rows(self, base: str, max_rows: int = 50) -> int:
         """扫 Data B 执行部门列(ZULEISTENDE/ctxtTABL-KOSTL)到空行，返回现有行数。"""
