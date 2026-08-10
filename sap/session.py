@@ -67,6 +67,14 @@ class SapSession:
         """写入控件文本。"""
         self.find(element_id).text = value
 
+    def read_key(self, element_id: str) -> str:
+        """读取下拉框 key 值。
+
+        下拉框的 text 是显示文本（如 "E1 国内电商"），与写入用的 key（"E1"）不同口径，
+        对比现值必须读 key，否则永远判定为"有差异"。
+        """
+        return self.find(element_id).key
+
     def set_key(self, element_id: str, value: str) -> None:
         """写入下拉框 key 值。"""
         self.find(element_id).key = value

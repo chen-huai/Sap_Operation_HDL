@@ -105,7 +105,8 @@ class SapOrderMixin:
           - 未税金额优先 'Revenue'，兜底 'Untaxed amount'（与 _build_revenue_from_order_row 对齐）
           - 汇率默认 1.0
         comboBox 用 QSignalBlocker 包裹，避免触发任何已绑定（或未来误绑）的信号槽。
-        Excel 中的 CS/Sales 若不在 configContent 中，setCurrentText 会静默保留原值，给出黄字提示但不阻断流程。
+        Sales 若不在 configContent 中，setCurrentText 会静默保留原值，给出黄字提示但不阻断流程
+        （Sales 非必填）；CS 取不到编号的订单在调用本方法之前就已被拦截跳过，故此处不再提示。
         """
         sap_no = self._excel_str(order_row.get('SAP Customer Code'))
         project_no = self._excel_str(order_row.get('Request Number'))
@@ -132,18 +133,23 @@ class SapOrderMixin:
         with QSignalBlocker(self.comboBox_3):
             self.comboBox_3.setCurrentText(sales_name)
 
-        if cs_name and cs_name not in configContent:
-            self.textBrowser.append(
-                "<font color='orange'>CS [%s] 不在配置文件中，csCode 将为空</font>" % cs_name
-            )
         if sales_name and sales_name not in configContent:
             self.textBrowser.append(
                 "<font color='orange'>Sales [%s] 不在配置文件中，salesCode 将为空</font>" % sales_name
             )
 
+    def _resolve_cs_code(self, order_row):
+        """解析 Primary CS 对应的 config 人员编号；CS 为空或未录入配置时返回空串。
+
+        SAP 伙伴页的"负责雇员"写的是该编号，取不到即无法完成订单，故也是订单必填校验的口径。
+        """
+        cs_name = self._excel_str(order_row.get('Primary CS'))
+        if not cs_name:
+            return ''
+        return self._excel_str(configContent.get(cs_name, ''))
+
     def _build_sap_config_from_order_row(self, order_row):
         """按当前订单行和系统配置构建 SAP 固定参数。"""
-        cs_name = self._excel_str(order_row.get('Primary CS'))
         sales_name = self._excel_str(order_row.get('Sales'))
         return SapConfig(
             # 登录界面
@@ -157,7 +163,7 @@ class SapOrderMixin:
             sub_cost_center_chm=self.lineEdit_19.text(),
             sub_cost_center_phy=self.lineEdit_20.text(),
             # cs和sales
-            cs_code=configContent.get(cs_name, ''),
+            cs_code=self._resolve_cs_code(order_row),
             sales_code=configContent.get(sales_name, ''),
             # 客户选择是否为海外订单
             data_ae1=self.lineEdit_21.text().split(';'),
@@ -668,6 +674,23 @@ class SapOrderMixin:
                     log_file.to_excel(log_data_path, merge_cells=False, index=False)
                     self.textBrowser.append(
                         "<font color='orange'>No.%s %s</font>" % (index + 1, skip_msg)
+                    )
+                    QApplication.processEvents()
+                    continue
+
+                # Primary CS 必填：为空、或 CS 名未录入 config 人员名单（解析不出 CS 编号）时，
+                # SAP 伙伴页的"负责雇员"无从写入，创建/编辑都没有意义，直接跳过当前订单。
+                # 与 Invoice Number 同层拦截，故创建与编辑两条分支同时覆盖。
+                cs_name = self._excel_str(order_row.get('Primary CS'))
+                if not self._resolve_cs_code(order_row):
+                    cs_msg = (
+                        'Primary CS 为空（必填），跳过不新建/编辑' if not cs_name
+                        else 'Primary CS [%s] 不在配置文件中（取不到 CS 编号），跳过不新建/编辑' % cs_name
+                    )
+                    log_file.loc[index, 'Remark'] = cs_msg
+                    log_file.to_excel(log_data_path, merge_cells=False, index=False)
+                    self.textBrowser.append(
+                        "<font color='red'>No.%s %s</font>" % (index + 1, cs_msg)
                     )
                     QApplication.processEvents()
                     continue

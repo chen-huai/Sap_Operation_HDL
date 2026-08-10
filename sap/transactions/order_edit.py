@@ -25,6 +25,7 @@ from sap.models import (
     SapConfig,
     SapResult,
 )
+from sap.rules import resolve_data_a_key, should_fill_ic_transaction
 from sap.session import SapSession
 from sap.transactions.order import OrderTransaction
 
@@ -78,14 +79,14 @@ class OrderEditTransaction:
             new_value: Excel 期望值。
             field: 字段中文名（用于差异摘要）。
             diffs: 差异收集列表（原地追加）。
-            is_key: 下拉框走 set_key，否则 set_text。
+            is_key: 下拉框走 read_key/set_key（key 与显示文本不同口径），否则 read_text/set_text。
             amount: 金额字段，按 .2f 口径归一化对比。
 
         Returns:
             bool: 是否发生了写入（有差异）。
         """
         try:
-            current = self.session.read_text(element_id)
+            current = self.session.read_key(element_id) if is_key else self.session.read_text(element_id)
         except SapUiError:
             # 控件读不到（可能 VA02 屏与创建屏不同）→ 记录待校正，绝不盲改。
             diffs.append(f"{field}:控件读取失败(待校正控件ID)")
@@ -109,7 +110,8 @@ class OrderEditTransaction:
     def edit_header(self, order: OrderData, diffs: list[str]) -> SapResult:
         """对比并更新订单抬头字段（仅差异）。
 
-        覆盖字段：售达方文本 / 币种 / 汇率 / Product Sub-Category 条件 / GPC Code / CS / Sales。
+        覆盖字段：售达方文本 / 币种 / 汇率 / Product Sub-Category 条件 / GPC Code / CS / Sales /
+        DATA A 客户组(T\\13) / ECD 与 IC 交易类型(T\\14)。
         Payer 由售达方(sap_no)联动，不单独写；Tax-inclusive amount 仅做校验不落 SAP 字段。
         售达方(sap_no)本身在 VA02 是否可改、控件 ID 待录制校正，见 _edit_sold_to。
         """
@@ -127,6 +129,8 @@ class OrderEditTransaction:
             self._edit_partners(order, diffs)
             self._edit_short_text(order, diffs)
             self._edit_submission(order, diffs)
+            self._edit_data_a(order, diffs)
+            self._edit_data_b_header(order, diffs)
         except Exception as exc:
             return SapResult.fail(f"抬头编辑失败，{exc}", step="edit_header")
         result.message = "；".join(diffs) if diffs else "抬头无差异"
@@ -382,6 +386,44 @@ class OrderEditTransaction:
         )
         self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\11")
         self._compare_and_set(submission_id, "EF", field="Submission(404)", diffs=diffs)
+
+    def _edit_data_a(self, order: OrderData, diffs: list[str]) -> None:
+        """对比 DATA A 客户组（T\\13 cmbVBAK-KVGR1），判定复用创建同一条规则。
+
+        客户号命中 Data_A_E1 → E1、Data_A_Z2 → Z2，否则兜底 00；客户改动后该值随之变化，
+        故编辑时必须重算回填，否则保留旧客户的分组。下拉框按 key 对比（见 _compare_and_set）。
+        """
+        self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\13")
+        self._compare_and_set(
+            "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\13/"
+            "ssubSUBSCREEN_BODY:SAPMV45A:4309/cmbVBAK-KVGR1",
+            resolve_data_a_key(order, self.config),
+            field="Data A",
+            diffs=diffs,
+            is_key=True,
+        )
+
+    def _edit_data_b_header(self, order: OrderData, diffs: list[str]) -> None:
+        """对比 T\\14 抬头两项：ECD 与 IC 交易类型（口径同创建 fill_header）。
+
+        - ECD(VORAUS_AUFENDE)：仅 Excel 有值才同步。Excel 缺 ECD 属数据不全，不视为"要清空"。
+        - IC 交易类型(IC_TRANSAKTION)：命中 Data_B_TUV → O1，未命中 → 清空。config 为权威，
+          客户从清单移除后 SAP 上的 O1 须随之撤销，故走全量对比覆盖而非"命中才写"。
+        """
+        base = "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312"
+        self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14")
+
+        if order.ecd:
+            self._compare_and_set(
+                f"{base}/ctxtZAUFTD-VORAUS_AUFENDE", order.ecd, field="ECD", diffs=diffs,
+            )
+
+        self._compare_and_set(
+            f"{base}/ctxtZAUFTD-IC_TRANSAKTION",
+            "O1" if should_fill_ic_transaction(order, self.config) else "",
+            field="IC交易类型",
+            diffs=diffs,
+        )
 
     # ------------------------------------------------------------------ #
     # item 编辑
