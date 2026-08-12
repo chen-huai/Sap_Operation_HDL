@@ -17,7 +17,7 @@ from .config import (
     get_executable_dir
 )
 from .config import get_config
-from .backup_manager import BackupManager
+from .backup_utils import create_local_backup
 
 # 异常类定义
 class UpdateExecutionError(Exception):
@@ -32,7 +32,6 @@ class UpdateExecutor:
 
     def __init__(self):
         self.config = get_config()
-        self.backup_manager = BackupManager()
 
         # 导入两阶段更新器和自动完成器
         try:
@@ -191,13 +190,6 @@ class UpdateExecutor:
             current_app_path = get_app_executable_path()
             print(f"当前应用程序路径: {current_app_path}")
 
-            # 如果是Python文件，尝试创建备份
-            if current_app_path.endswith('.py'):
-                print("开发环境：检测到Python应用程序，创建备份...")
-                backup_path = self.backup_manager.create_backup()
-                if backup_path:
-                    print(f"已创建开发环境备份: {os.path.basename(backup_path)}")
-
             # 强制执行文件替换（处理Python到exe的转换）
             try:
                 print(f"开发环境：执行文件替换...")
@@ -215,11 +207,8 @@ class UpdateExecutor:
 
                 print(f"  目标文件: {target_path}")
 
-                # 创建备份
-                if os.path.exists(target_path):
-                    backup_current = target_path + f".backup.{int(time.time())}"
-                    shutil.copy2(target_path, backup_current)
-                    print(f"  已创建备份: {os.path.basename(backup_current)}")
+                # 创建备份（失败不阻断更新，仅影响人工回退）
+                create_local_backup(target_path)
 
                 # 强制替换文件
                 shutil.copy2(update_file_path, target_path)
@@ -278,12 +267,8 @@ class UpdateExecutor:
         try:
             current_exe_path = get_app_executable_path()
 
-            # 创建备份
-            backup_path = self.backup_manager.create_backup()
-            if not backup_path:
-                raise UpdateExecutionError("创建备份失败")
-
-            print(f"已创建备份: {backup_path}")
+            # 创建备份（失败不阻断更新：两阶段更新保证主目录 exe 在替换成功前原样在位）
+            backup_path = create_local_backup(current_exe_path)
 
             # 尝试替换可执行文件
             replacement_success = self._replace_executable(update_file_path, current_exe_path)
@@ -301,8 +286,13 @@ class UpdateExecutor:
                     return True
                 else:
                     print("文件替换验证失败，使用延迟更新")
-                    # 回滚备份并使用延迟更新
-                    self.backup_manager.restore_from_backup()
+                    # 替换后的文件已不可信，从备份恢复原文件后再走延迟更新
+                    if backup_path:
+                        try:
+                            shutil.copy2(backup_path, current_exe_path)
+                            print("已从备份恢复原文件")
+                        except Exception as restore_error:
+                            print(f"从备份恢复失败: {restore_error}")
                     return self._schedule_delayed_update(update_file_path, current_exe_path, new_version)
             else:
                 # 如果直接替换失败，使用批处理脚本延迟更新
@@ -455,6 +445,8 @@ class UpdateExecutor:
         Returns:
             MD5哈希值
         """
+        import hashlib
+
         hash_md5 = hashlib.md5()
         try:
             with open(file_path, "rb") as f:
@@ -596,32 +588,6 @@ del "%~f0" 2>nul
         except Exception as e:
             print(f"重启应用程序失败: {e}")
             return False
-
-    def rollback_update(self) -> bool:
-        """
-        回滚到上一个版本
-        :return: 是否回滚成功
-        """
-        try:
-            # 获取最新备份
-            latest_backup = self.backup_manager.get_latest_backup()
-            if not latest_backup:
-                raise UpdateExecutionError("没有找到可用的备份文件")
-
-            # 从备份恢复
-            success = self.backup_manager.restore_from_backup(latest_backup)
-            if not success:
-                raise UpdateExecutionError("从备份恢复失败")
-
-            # 更新版本文件
-            # 注意：这里需要根据实际情况确定如何获取备份的版本号
-            # 暂时使用本地版本管理器的当前版本
-
-            print("回滚成功")
-            return True
-
-        except Exception as e:
-            raise UpdateExecutionError(f"回滚失败: {str(e)}")
 
     def validate_update_file(self, update_file_path: str) -> tuple:
         """

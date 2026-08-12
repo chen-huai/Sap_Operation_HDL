@@ -7,7 +7,6 @@ PDF重命名工具自动更新模块
 from .config import get_config, is_development_environment
 from .github_client import GitHubClient
 from .download_manager import DownloadManager
-from .backup_manager import BackupManager
 from .update_executor import UpdateExecutor
 from .config import *
 
@@ -51,7 +50,6 @@ class AutoUpdater:
         self.config = get_config()
         self.github_client = GitHubClient()
         self.download_manager = DownloadManager()
-        self.backup_manager = BackupManager()
         self.update_executor = UpdateExecutor()
         self.parent = parent
 
@@ -138,11 +136,6 @@ class AutoUpdater:
             if not download_url:
                 return False, None, "无法获取下载链接"
 
-            # 创建备份
-            backup_path = self.backup_manager.create_backup()
-            if not backup_path:
-                return False, None, "创建备份失败"
-
             # 下载文件
             downloaded_file = self.download_manager.download_file(
                 download_url,
@@ -208,21 +201,6 @@ class AutoUpdater:
             return False, f"参数验证失败: {str(e)}"
         except Exception as e:
             return False, f"执行更新异常: {str(e)}"
-
-    def rollback_update(self) -> tuple:
-        """
-        回滚更新
-        :return: (是否成功, 错误信息)
-        """
-        try:
-            success = self.backup_manager.restore_from_backup()
-            if success:
-                return True, None
-            else:
-                return False, "回滚失败"
-
-        except Exception as e:
-            return False, f"回滚异常: {str(e)}"
 
     def _is_valid_version_format(self, version: str) -> bool:
         """
@@ -380,7 +358,6 @@ __all__ = [
     'AutoUpdater',
     'GitHubClient',
     'DownloadManager',
-    'BackupManager',
     'UpdateExecutor',
     'get_config',
 

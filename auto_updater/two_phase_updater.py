@@ -20,6 +20,7 @@ from datetime import datetime
 
 from .config import get_executable_dir, get_app_executable_path
 from .config_constants import APP_EXECUTABLE
+from .backup_utils import create_local_backup
 
 logger = logging.getLogger(__name__)
 
@@ -146,10 +147,8 @@ class TwoPhaseUpdater:
                 logger.info(f"[两阶段更新] 保持待更新状态，下次启动时重试")
                 return False, "目标文件仍在被占用，稍后重试"
 
-            # 备份目标文件
-            backup_path = self._create_backup(target_file)
-            if backup_path:
-                logger.info(f"[两阶段更新] ✓ 已创建备份: {os.path.basename(backup_path)}")
+            # 备份目标文件（失败不阻断，下载目录的新版本本身即为回退保障）
+            create_local_backup(target_file)
 
             # 执行文件替换
             try:
@@ -225,24 +224,6 @@ class TwoPhaseUpdater:
         except Exception:
             # 文件被占用或其他错误
             return True
-
-    def _create_backup(self, file_path: str) -> Optional[str]:
-        """
-        创建备份文件
-
-        Args:
-            file_path: 要备份的文件路径
-
-        Returns:
-            备份文件路径，失败返回None
-        """
-        try:
-            from .backup_manager import BackupManager
-            backup_manager = BackupManager()
-            return backup_manager.create_backup()
-        except Exception as e:
-            logger.error(f"[两阶段更新] 创建备份失败: {e}")
-            return None
 
     def _create_success_marker(self, update_data: dict) -> None:
         """

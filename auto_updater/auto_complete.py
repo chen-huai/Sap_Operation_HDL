@@ -15,6 +15,7 @@ from typing import Optional
 
 from .config import get_executable_dir, get_app_executable_path
 from .config_constants import APP_EXECUTABLE
+from .backup_utils import create_local_backup
 
 logger = logging.getLogger(__name__)
 
@@ -179,16 +180,8 @@ class AutoCompleter:
                     callback(False, "旧进程仍在运行")
                 return
 
-            # 创建备份
-            try:
-                from .backup_manager import BackupManager
-                backup_manager = BackupManager()
-                backup_path = backup_manager.create_backup()
-                if backup_path:
-                    logger.info(f"[自动完成更新] ✓ 已创建备份")
-            except Exception as e:
-                logger.warning(f"[自动完成更新] 创建备份失败: {e}")
-                backup_path = None
+            # 备份目标文件（失败不阻断，仅影响替换失败时的自动恢复）
+            backup_path = create_local_backup(target_file)
 
             # 执行文件替换
             try:

@@ -12,8 +12,8 @@
 graph TD
     A[AutoUpdater<br/>__init__.py] --> B[GitHubClient<br/>github_client.py]
     A --> C[DownloadManager<br/>download_manager.py]
-    A --> D[BackupManager<br/>backup_manager.py]
     A --> E[UpdateExecutor<br/>update_executor.py]
+    E --> D[create_local_backup<br/>backup_utils.py]
     A --> F[ui/ 子模块]
 
     F --> F1[UpdateUIManager<br/>ui_manager.py]
@@ -35,7 +35,7 @@ graph TD
 | `__init__.py` | `AutoUpdater` | 主接口类，整合所有更新组件 |
 | `github_client.py` | `GitHubClient` | GitHub API 交互，获取版本和下载链接 |
 | `download_manager.py` | `DownloadManager` | 文件下载与进度回调 |
-| `backup_manager.py` | `BackupManager` | 更新前备份与回滚 |
+| `backup_utils.py` | `create_local_backup()` | 在原文件旁生成 `.backup.<时间戳>` 副本，供人工回退 |
 | `update_executor.py` | `UpdateExecutor` | 执行实际的文件替换更新 |
 | `config.py` | `get_config()` | 更新配置管理 |
 | `config_constants.py` | `CURRENT_VERSION` | 当前版本号常量 |
@@ -67,7 +67,6 @@ updater = AutoUpdater(parent=main_window)
 has_update, remote_ver, local_ver, err = updater.check_for_updates()
 success, file_path, err = updater.download_update(version)
 success, err = updater.execute_update(file_path, version)
-success, err = updater.rollback_update()
 updater.setup_update_ui(menu_bar)
 ```
 

@@ -53,7 +53,7 @@ graph TD
         A --> P[auto_updater/<br/>自动更新系统]
         P --> P1[github_client.py]
         P --> P2[download_manager.py]
-        P --> P3[backup_manager.py]
+        P --> P3[backup_utils.py]
         P --> P4[update_executor.py]
         P --> P5[ui/ 子模块<br/>更新 UI 组件]
     end
