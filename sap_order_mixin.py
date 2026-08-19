@@ -399,7 +399,7 @@ class SapOrderMixin:
         combine_id = self._excel_str(order_row.get('Combine Id'))
         primary_cs = self._excel_str(order_row.get('Primary CS'))
         sales_name = self._excel_str(order_row.get('Sales'))
-        excel_amount_vat = self._excel_str(order_row.get('Tax-inclusive amount'))
+        excel_amount_untaxed = self._excel_str(order_row.get('Untaxed amount'))
 
         self.textBrowser.append('========== No.%s [编辑] ==========' % (index + 1))
         self.textBrowser.append("Combine Id: %s" % combine_id)
@@ -516,19 +516,19 @@ class SapOrderMixin:
             remarks.append(f"Save:{save_result.message}" if save_result.message else "Save")
             _report_step('Save VA02', save_result)
 
-        # 含税金额一致性校验（与创建分支同口径）。
+        # 未税金额一致性校验（与创建分支同口径）：SAP 加和为未税净值，对 Excel Untaxed amount。
         try:
             sap_amount_value = float(str(sap_amount_vat).replace(',', '')) if sap_amount_vat else 0.0
         except (TypeError, ValueError):
             sap_amount_value = 0.0
         try:
-            excel_amount_value = float(str(excel_amount_vat).replace(',', '')) if excel_amount_vat else 0.0
+            excel_amount_value = float(str(excel_amount_untaxed).replace(',', '')) if excel_amount_untaxed else 0.0
         except (TypeError, ValueError):
             excel_amount_value = 0.0
         amount_diff = round(sap_amount_value - excel_amount_value, 2)
         if excel_amount_value > 0 and abs(amount_diff) >= 0.01:
             diff_msg = (
-                f"含税金额不一致: Excel={format(excel_amount_value, ',.2f')} "
+                f"未税金额不一致: Excel={format(excel_amount_value, ',.2f')} "
                 f"SAP={format(sap_amount_value, ',.2f')} 差额={format(amount_diff, ',.2f')}"
             )
             remarks.append(diff_msg)
@@ -799,11 +799,11 @@ class SapOrderMixin:
                     QApplication.processEvents()
                     continue
 
-                # textBrowser 抬头：基础信息 + Excel 含税金额。
+                # textBrowser 抬头：基础信息 + Excel 未税金额。
                 combine_id = self._excel_str(order_row.get('Combine Id'))
                 primary_cs = self._excel_str(order_row.get('Primary CS'))
                 sales_name = self._excel_str(order_row.get('Sales'))
-                excel_amount_vat = self._excel_str(order_row.get('Tax-inclusive amount'))
+                excel_amount_untaxed = self._excel_str(order_row.get('Untaxed amount'))
                 items_revenue_total = sum(item.revenue for item in order.items)
 
                 self.textBrowser.append('==================== No.%s ====================' % (index + 1))
@@ -811,7 +811,7 @@ class SapOrderMixin:
                 self.textBrowser.append("Request Number: %s" % order.project_no)
                 self.textBrowser.append("Primary CS: %s" % primary_cs)
                 self.textBrowser.append("Sales: %s" % sales_name)
-                self.textBrowser.append("含税金额(Excel): %s" % excel_amount_vat)
+                self.textBrowser.append("未税金额(Excel): %s" % excel_amount_untaxed)
                 self.textBrowser.append("Items 加和金额: %s" % format(items_revenue_total, ',.2f'))
                 QApplication.processEvents()
 
@@ -1004,14 +1004,14 @@ class SapOrderMixin:
                     if not order_no:
                         order_no = self._extract_order_no(sap_session)
 
-                # SAP 加和金额本身已经含税，理论上应等于 Excel "Tax-inclusive amount"。
-                # 容差 0.01 容忍浮点误差；只有在 Excel 含税金额可用时才比较，避免空值误判。
+                # SAP 加和金额为未税净值，理论上应等于 Excel "Untaxed amount"。
+                # 容差 0.01 容忍浮点误差；只有在 Excel 未税金额可用时才比较，避免空值误判。
                 try:
                     sap_amount_value = float(str(sap_amount_vat).replace(',', '')) if sap_amount_vat else 0.0
                 except (TypeError, ValueError):
                     sap_amount_value = 0.0
                 try:
-                    excel_amount_value = float(str(excel_amount_vat).replace(',', '')) if excel_amount_vat else 0.0
+                    excel_amount_value = float(str(excel_amount_untaxed).replace(',', '')) if excel_amount_untaxed else 0.0
                 except (TypeError, ValueError):
                     excel_amount_value = 0.0
 
@@ -1019,7 +1019,7 @@ class SapOrderMixin:
                 amount_mismatch = excel_amount_value > 0 and abs(amount_diff) >= 0.01
                 if amount_mismatch:
                     diff_msg = (
-                        f"含税金额不一致: Excel={format(excel_amount_value, ',.2f')} "
+                        f"未税金额不一致: Excel={format(excel_amount_value, ',.2f')} "
                         f"SAP={format(sap_amount_value, ',.2f')} "
                         f"差额={format(amount_diff, ',.2f')}"
                     )
@@ -1033,13 +1033,13 @@ class SapOrderMixin:
                 log_file.loc[index, 'Update Time'] = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
                 log_file.to_excel(log_data_path, merge_cells=False, index=False)
 
-                # 订单结束摘要：order no + SAP 含税金额；与 Excel 含税金额一致性提示。
+                # 订单结束摘要：order no + SAP 未税金额；与 Excel 未税金额一致性提示。
                 self.textBrowser.append("Order No.: %s" % order_no)
-                self.textBrowser.append("SAP 金额(加和,含税): %s" % (sap_amount_vat or '--'))
+                self.textBrowser.append("SAP 金额(加和,未税): %s" % (sap_amount_vat or '--'))
                 if amount_mismatch:
                     self.textBrowser.append("<font color='red'>%s</font>" % diff_msg)
                 elif excel_amount_value > 0:
-                    self.textBrowser.append("含税金额一致(Excel == SAP)")
+                    self.textBrowser.append("未税金额一致(Excel == SAP)")
                 self.textBrowser.append('----------------------------------')
                 QApplication.processEvents()
 
