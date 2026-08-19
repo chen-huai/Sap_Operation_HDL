@@ -898,13 +898,10 @@ class OrderEditTransaction:
                     amount=True,
                 )
 
-            # 表格行之后的尾部由强制成本中心行独占：先认领已匹配的前缀（幂等，不重复删建），
-            # 其余尾部行一律删除后重建，避免旧表格行的费率中心/固定价格残留在强制行上。
-            keep = self._count_matching_forced_rows(base, written, forced, existing_rows)
-            tail_start = written + keep
-
-            # 期望之外的多余行（SAP 行数 > 期望行数）→ 末行往前删，避免删除后行号位移。
-            for row in range(existing_rows - 1, tail_start - 1, -1):
+            # 正常 Excel 行写完后，先把其后的全部现存行删光，保证 SAP 与 Excel 完全一致，
+            # 再从末尾追加强制成本中心行——避免旧表格行/旧强制行的费率中心、固定价格残留。
+            # 不复用已有强制行前缀：强制行统一"删旧重加"，语义简单且结果幂等。
+            for row in range(existing_rows - 1, written - 1, -1):
                 try:
                     performer = (self.session.read_text(
                         f"{base}/tblSAPMV45AZULEISTENDE/ctxtTABL-KOSTL[0,{row}]"
@@ -914,8 +911,8 @@ class OrderEditTransaction:
                 self._delete_data_b_row(base, row)
                 diffs.append(f"DataB[{row}](执行部门{performer}):期望外,已删除")
 
-            # 补写尚未落地的强制成本中心行。
-            for offset in range(keep, len(forced)):
+            # SAP 已与 Excel 一致，从 written 起逐行追加强制成本中心行。
+            for offset in range(len(forced)):
                 row = written + offset
                 cost_center = (forced[offset].performer_cost_center or "").strip()
                 if not cost_center:
@@ -932,48 +929,20 @@ class OrderEditTransaction:
 
     def _delete_data_b_row(self, base: str, row: int) -> None:
         """删除 Data B 指定行（见用户 SAP 录屏）：选中 ZULEISTENDE/KOSTENSAETZE 两个子表的该行
-        → 聚焦费率成本中心格 → 按专用删除按钮 btnTABLOESCH → 确认弹窗。
+        → 聚焦执行部门格 → 按专用删除按钮 btnTABLOESCH → 确认弹窗。
 
         Data B 删除非"置空控件"，须两个子表同时选中该行再按删除按钮。
+        聚焦落在 ZULEISTENDE/ctxtTABL-KOSTL（执行部门）而非 KOSTENSAETZE/ctxtTABD-KOSTL：
+        强制成本中心行的 KOSTENSAETZE/TABD-KOSTL 为空/不可编辑，聚焦该元素会导致 SAP 流程
+        中断；删除按钮依"选中行"生效，聚焦仅定位光标，改聚焦执行部门列同样有效且安全。
         """
         zul = f"{base}/tblSAPMV45AZULEISTENDE"
         kos = f"{base}/tblSAPMV45AKOSTENSAETZE"
         self.session.find(zul).getAbsoluteRow(row).selected = True
         self.session.find(kos).getAbsoluteRow(row).selected = True
-        self.session.focus(f"{kos}/ctxtTABD-KOSTL[0,{row}]", 0)
+        self.session.focus(f"{zul}/ctxtTABL-KOSTL[0,{row}]", 0)
         self.session.press(f"{base}/btnTABLOESCH")
         self._try_press("wnd[1]/usr/btnSPOP-OPTION1")
-
-    def _count_matching_forced_rows(
-        self,
-        base: str,
-        start_row: int,
-        forced: list[DataBEntry],
-        existing_rows: int,
-    ) -> int:
-        """从 start_row 起，统计已与期望强制成本中心行逐行匹配的前缀长度。
-
-        匹配条件：执行部门相同，且固定价格为空/0（有金额说明该行是遗留的表格行，
-        必须删除重建，否则强制行上会残留旧金额）。一旦不匹配立即停止——后续行会被
-        整体截断重建，保留中间行会导致删除后行号错位。
-        """
-        keep = 0
-        while keep < len(forced) and start_row + keep < existing_rows:
-            row = start_row + keep
-            expected = (forced[keep].performer_cost_center or "").strip()
-            try:
-                kostl = (self.session.read_text(
-                    f"{base}/tblSAPMV45AZULEISTENDE/ctxtTABL-KOSTL[0,{row}]"
-                ) or "").strip()
-                festpreis = (self.session.read_text(
-                    f"{base}/tblSAPMV45AKOSTENSAETZE/txtTABD-FESTPREIS[5,{row}]"
-                ) or "").strip()
-            except SapUiError:
-                break
-            if kostl != expected or self._norm_amount(festpreis) not in ("", "0.00"):
-                break
-            keep += 1
-        return keep
 
     def _count_existing_data_b_rows(self, base: str, max_rows: int = 50) -> int:
         """扫 Data B 执行部门列(ZULEISTENDE/ctxtTABL-KOSTL)到空行，返回现有行数。"""
