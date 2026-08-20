@@ -235,6 +235,9 @@ class SapResult:
     step: str = ""
     # 警告标记：操作未失败（success=True）但有需提示用户的情况（如跳过），UI 用区别色显示。
     warning: bool = False
+    # 本步骤是否实际改动了 SAP；False 表示对比后无差异、原样跳过。
+    # 调用方据此决定后续动作（如 Data B 未清空则无需中途保存），默认 True 不影响既有步骤。
+    changed: bool = True
 
     @staticmethod
     def fail(msg: str, *, step: str = "") -> "SapResult":

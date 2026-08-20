@@ -240,59 +240,69 @@ class OrderTransaction:
             # 进入售达方，data b：最大化主窗口，进入抬头视图，切换到 T\14 页签。
             self.session.press("wnd[0]/usr/subSUBSCREEN_HEADER:SAPMV45A:4021/btnBT_HEAD")
             self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14")
-            for row, entry in enumerate(entries):
-                performer_cost_center = entry.performer_cost_center.strip()
-                kostl_id = (
-                    f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
-                    f"tblSAPMV45AZULEISTENDE/ctxtTABL-KOSTL[0,{row}]"
-                )
-
-                if entry.kostl_only:
-                    # config 强制成本中心行：只录执行部门，回车让 SAP 带出该行，
-                    # 不写 item 号 / 费率成本中心 / 固定价格。
-                    if not performer_cost_center:
-                        continue
-                    self.session.set_text(kostl_id, performer_cost_center)
-                    self.session.focus(kostl_id, len(performer_cost_center))
-                    self.session.send_vkey(0)
-                    continue
-
-                rate_cost_center = (entry.rate_cost_center or performer_cost_center).strip()
-                # 单条 Data B 只能对应一个 item，若上游传 "1000;3000" 这种多 item，
-                # 取第一个 ";" 之前的部分，保留 SAP POSNR 字段单值约束。
-                raw_item = (entry.item or "").strip()
-                item_no = raw_item.split(";", 1)[0].strip() if raw_item else ""
-                if not performer_cost_center and not rate_cost_center:
-                    continue
-                # Data B 页签中同一行需要同时写执行部门、ZULEISTENDE/KOSTENSAETZE 双表 item 号、费率成本中心和固定价格。
-                self.session.set_text(kostl_id, performer_cost_center)
-                if item_no and order.sales_group != '240':
-                    # ZULEISTENDE 表格 item 号写入；缺失和 sales_group 为 240 时跳过，由 SAP 默认行为兜底。
-                    self.session.set_text(
-                        f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
-                        f"tblSAPMV45AZULEISTENDE/txtTABL-ZPOSITION[1,{row}]",
-                        item_no,
-                    )
-                self.session.set_text(
-                    f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
-                    f"tblSAPMV45AKOSTENSAETZE/ctxtTABD-KOSTL[0,{row}]",
-                    rate_cost_center,
-                )
-                if item_no and order.sales_group != '240':
-                    # KOSTENSAETZE 表格 item 号写入；缺失和 sales_group 为 240 时跳过，由 SAP 默认行为兜底。
-                    self.session.set_text(
-                        f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
-                        f"tblSAPMV45AKOSTENSAETZE/txtTABD-POSNR[1,{row}]",
-                        item_no,
-                    )
-                self.session.set_text(
-                    f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
-                    f"tblSAPMV45AKOSTENSAETZE/txtTABD-FESTPREIS[5,{row}]",
-                    format(float(entry.amount), ".2f"),
-                )
+            self._write_lab_cost_rows(entries, order)
         except Exception as exc:
             return SapResult.fail(f"Data B未填写，{exc}", step="lab_cost")
         return result
+
+    def _write_lab_cost_rows(self, entries: list[DataBEntry], order: OrderData) -> None:
+        """在已进入 T\\14 页签的前提下，从 row 0 起逐行写入 Data B 明细。
+
+        创建(VA01)与编辑(VA02 删空后重建)共用；不含导航/删除，调用方须保证已在正确页签、
+        且表格为可从 row 0 顺序追加的状态。正常行写全字段（执行部门 / ZULEISTENDE·KOSTENSAETZE
+        双表 item 号 / 费率成本中心 / 固定价格）；config 强制成本中心行只写执行部门并回车让 SAP
+        带出该行，绝不碰费率成本中心 / item 号 / 固定价格。
+        """
+        for row, entry in enumerate(entries):
+            performer_cost_center = entry.performer_cost_center.strip()
+            kostl_id = (
+                f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
+                f"tblSAPMV45AZULEISTENDE/ctxtTABL-KOSTL[0,{row}]"
+            )
+
+            if entry.kostl_only:
+                # config 强制成本中心行：只录执行部门，回车让 SAP 带出该行，
+                # 不写 item 号 / 费率成本中心 / 固定价格。
+                if not performer_cost_center:
+                    continue
+                self.session.set_text(kostl_id, performer_cost_center)
+                self.session.focus(kostl_id, len(performer_cost_center))
+                self.session.send_vkey(0)
+                continue
+
+            rate_cost_center = (entry.rate_cost_center or performer_cost_center).strip()
+            # 单条 Data B 只能对应一个 item，若上游传 "1000;3000" 这种多 item，
+            # 取第一个 ";" 之前的部分，保留 SAP POSNR 字段单值约束。
+            raw_item = (entry.item or "").strip()
+            item_no = raw_item.split(";", 1)[0].strip() if raw_item else ""
+            if not performer_cost_center and not rate_cost_center:
+                continue
+            # Data B 页签中同一行需要同时写执行部门、ZULEISTENDE/KOSTENSAETZE 双表 item 号、费率成本中心和固定价格。
+            self.session.set_text(kostl_id, performer_cost_center)
+            if item_no and order.sales_group != '240':
+                # ZULEISTENDE 表格 item 号写入；缺失和 sales_group 为 240 时跳过，由 SAP 默认行为兜底。
+                self.session.set_text(
+                    f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
+                    f"tblSAPMV45AZULEISTENDE/txtTABL-ZPOSITION[1,{row}]",
+                    item_no,
+                )
+            self.session.set_text(
+                f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
+                f"tblSAPMV45AKOSTENSAETZE/ctxtTABD-KOSTL[0,{row}]",
+                rate_cost_center,
+            )
+            if item_no and order.sales_group != '240':
+                # KOSTENSAETZE 表格 item 号写入；缺失和 sales_group 为 240 时跳过，由 SAP 默认行为兜底。
+                self.session.set_text(
+                    f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
+                    f"tblSAPMV45AKOSTENSAETZE/txtTABD-POSNR[1,{row}]",
+                    item_no,
+                )
+            self.session.set_text(
+                f"wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312/"
+                f"tblSAPMV45AKOSTENSAETZE/txtTABD-FESTPREIS[5,{row}]",
+                format(float(entry.amount), ".2f"),
+            )
 
     def save(self, info: str) -> SapResult:
         """Save current order page and verify status."""

@@ -464,12 +464,33 @@ class SapOrderMixin:
 
         # Data B 同步门控：勾选 labCostCheck 即执行（labCostCheck→编辑 Data B），与 Excel 是否
         # 有 Data B 行无关——Excel 整理后无某条须删对应 SAP 行，Data B 全空须删 SAP 全部行。
-        # 旧版误用 `and data_b_entries` 短路，导致 Excel 清空时 edit_data_b 根本不被调用、删不掉原有行。
+        # 旧版误用 `and data_b_entries` 短路，导致 Excel 清空时同步整段不被调用、删不掉原有行。
         data_b_enabled = bool(flow_options.get('labCostCheck'))
-        # Data B 前保存：仅当有 item 新增且本次确有 Data B 行要写时——新 item 须落盘（否则引用报错），
+
+        # Data B 第一段（clear）：与 Excel 比对，一致则整段跳过（changed=False），有差异才两阶段删空。
+        # 删空与重建之间必须隔一次 save + open_order：成本表行是对执行部门表成本中心的引用，
+        # 同屏内 SAP 不认未落库的新增行，删后直接写必报 ZR520（见 clear_data_b 文档）。
+        data_b_changed = False
+        if data_b_enabled:
+            clear_diffs: list[str] = []
+            clear_result = service.clear_data_b(
+                data_b_entries, order, clear_diffs, item_no_map=item_no_map,
+            )
+            data_b_changed = clear_result.changed
+            remarks.append(
+                f"Data B 清空:{clear_result.message}" if clear_result.message else "Data B 清空"
+            )
+            _report_step('Data B 清空', clear_result)
+            if not clear_result.success:
+                self._write_edit_log(
+                    log_file, log_data_path, index, order_no, remarks, sap_amount_vat
+                )
+                return
+
+        # Data B 前保存：需要重建且确有行要写时——删除须先落盘（否则成本表引用报错），
         # 且改号 item 的真实号仅落盘后才由 SAP 分配，保存 + 重开后重建映射拿到真实号供 POSNR 使用。
-        # 纯删除（Excel Data B 为空）不引用新 item，无需前保存。
-        if item_ok and added and data_b_enabled and data_b_entries:
+        # 纯删除（Excel Data B 为空）不写成本表，无需前保存；比对一致时更是零额外开销。
+        if data_b_enabled and data_b_entries and (data_b_changed or (item_ok and added)):
             save_before_db = service.save('VA02 Edit - Before Data B')
             _report_step('Data B 前保存', save_before_db)
             if not save_before_db.success:
@@ -489,15 +510,19 @@ class SapOrderMixin:
                 return
             item_no_map = service.build_item_no_mapping(added)
 
-        # Data B 编辑（labCostCheck）：写入 Excel 行 + 删除 Excel 无的多余行（含 Excel 全空 → 全删）。
-        # POSNR 用映射后的真实号（映射为空时回退 ODM 号，绝不写空）。
-        if data_b_enabled:
+        # Data B 第二段（write）：从空表重建全部行。POSNR 用前保存后重建的真实号
+        # （映射为空时回退 ODM 号，绝不写空）。Excel Data B 全空时只删不写，天然跳过本段。
+        # data_b_incomplete 跟踪"已清空但未成功重建"的中间态：删除已随前保存落库，
+        # 若重建或最终保存失败，SAP 侧会停在 Data B 为空，必须显式告警而非只报步骤失败。
+        data_b_incomplete = False
+        if data_b_enabled and data_b_changed and data_b_entries:
             db_diffs: list[str] = []
-            data_b_result = service.edit_data_b(
+            data_b_result = service.write_data_b(
                 data_b_entries, order, db_diffs, item_no_map=item_no_map,
             )
             remarks.append(f"Data B:{data_b_result.message}" if data_b_result.message else "Data B")
-            _report_step('Data B 编辑', data_b_result)
+            _report_step('Data B 重建', data_b_result)
+            data_b_incomplete = not data_b_result.success
 
         # 订单价值(AUFTRAGSWERT)：Σ SAP item 未税净值 × 汇率，有 item 即幂等重算回填，
         # 并自愈历史双重汇率脏值。
@@ -515,6 +540,15 @@ class SapOrderMixin:
             save_result = service.save('VA02 Edit')
             remarks.append(f"Save:{save_result.message}" if save_result.message else "Save")
             _report_step('Save VA02', save_result)
+            if data_b_changed and data_b_entries and not save_result.success:
+                data_b_incomplete = True
+
+        # 中间态告警：Data B 的清空已落库、重建未成功 → 该订单当前 Data B 为空。
+        # 全删重建是幂等的，重跑同一订单即可自动恢复，故提示重跑优先于人工补录。
+        if data_b_incomplete:
+            incomplete_msg = 'Data B 已清空未重建，需重跑该订单或人工补录'
+            remarks.append(incomplete_msg)
+            self.textBrowser.append("<font color='red'>%s</font>" % incomplete_msg)
 
         # 未税金额一致性校验（与创建分支同口径）：SAP 加和为未税净值，对 Excel Untaxed amount。
         try:

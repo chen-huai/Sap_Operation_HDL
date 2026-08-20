@@ -44,15 +44,28 @@ class OrderEditService:
         """中途 save+open 后建立新增 item 的 ODM→SAP 号映射。"""
         return self.transaction.build_item_no_mapping(added)
 
-    def edit_data_b(
+    def clear_data_b(
         self,
         entries: list[DataBEntry],
         order: OrderData,
         diffs: list[str],
         item_no_map: dict[str, str] | None = None,
     ) -> SapResult:
-        """对比并更新 Data B 行；item_no_map 提供新增改号 item 的真实号。"""
-        return self.transaction.edit_data_b(entries, order, diffs, item_no_map)
+        """Data B 第一段：与 Excel 比对，有差异才删空（changed=False 表示一致已跳过）。
+
+        与 write_data_b 之间必须隔一次 save + open_order，否则写成本表必报 ZR520。
+        """
+        return self.transaction.clear_data_b(entries, order, diffs, item_no_map)
+
+    def write_data_b(
+        self,
+        entries: list[DataBEntry],
+        order: OrderData,
+        diffs: list[str],
+        item_no_map: dict[str, str] | None = None,
+    ) -> SapResult:
+        """Data B 第二段：从空表重建全部行；item_no_map 提供新增改号 item 的真实号。"""
+        return self.transaction.write_data_b(entries, order, diffs, item_no_map)
 
     def edit_order_value(self, order: OrderData, diffs: list[str]) -> SapResult:
         """对比并更新订单价值(AUFTRAGSWERT)：Σ SAP item 未税净值 × 汇率。"""

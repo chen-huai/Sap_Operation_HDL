@@ -15,6 +15,9 @@ VA02 编辑屏部分控件 ID 是否与创建抬头视图完全一致尚未实�
 
 from __future__ import annotations
 
+from collections import Counter
+from dataclasses import replace
+
 from sap.exceptions import SapUiError
 from sap.models import (
     DataBEntry,
@@ -476,18 +479,13 @@ class OrderEditTransaction:
                 else:
                     new_items.append(item)
 
-            sap_amount_total = 0.0
-            sap_amount_text = ""
-
             # 批次一：命中项（进详情逐字段比对金额/长文本，仅差异才写，绝不碰只读物料）。
             for row, item in matched:
-                amount_text, summary = self._enter_item_and_write_condition(
+                _amount_text, summary = self._enter_item_and_write_condition(
                     row, item, result, is_new=False, currency=order.currency_type
                 )
                 if summary:
                     diffs.append(summary)
-                sap_amount_text = amount_text or sap_amount_text
-                sap_amount_total += self._base._parse_amount(amount_text)
 
             # 批次二：新增项。写入末尾行 → 回车（SAP 重排）→ 重读定位当前行 → 写金额/文本。
             known_item_nos = set(existing_item_nos)
@@ -518,8 +516,6 @@ class OrderEditTransaction:
                 known_item_nos = {n for _, n, _, _ in self._read_existing_item_rows() if n}
                 if summary:
                     diffs.append(summary)
-                sap_amount_text = amount_text or sap_amount_text
-                sap_amount_total += self._base._parse_amount(amount_text)
 
             # SAP 有但 ODM 表格没有的行 → 每行一条提示，不删不改（用初始概览与 matched_rows，二者同基准一致）。
             for row, item_no, material, amount in existing:
@@ -528,9 +524,17 @@ class OrderEditTransaction:
                         f"item {item_no} 物料 {material} 金额 {amount}：SAP 有、Excel 无，已跳过"
                     )
 
-            result.sap_amount_vat = (
-                self._base._format_amount(sap_amount_total) if len(items) > 1 else sap_amount_text
-            )
+            # 未税加和：全部 item 写完后回概览页重读一次全量净值(Σ VBAP-NETWR)，与
+            # edit_order_value / 创建路径 fill_order_value 完全同源。不用"边写边累加"的中间值：
+            #   ① 那会漏掉"SAP 有、Excel 无"的 item，加和小于 SAP 订单真实总额；
+            #   ② 先前 item 的净值会被后续新增触发的 SAP 重排/重算改变，累加值不会回头更新；
+            #   ③ 单 item 曾走"取最后一次读到的文本"分支，读不到时直接落空串 → 校验按 0 比对。
+            self._base._ensure_item_overview()
+            net_total, truncated = self._base._sum_item_net_values()
+            result.sap_amount_vat = self._base._format_amount(net_total)
+            if truncated:
+                result.warning = True
+                diffs.append("item 行数超过扫描上限，未税加和可能少算，请人工核对")
         except Exception as exc:
             return SapResult.fail(f"item 编辑失败，{exc}", step="edit_items")
         result.message = "；".join(diffs) if diffs else "item 无差异"
@@ -813,17 +817,79 @@ class OrderEditTransaction:
     # ------------------------------------------------------------------ #
     # sub 编辑（Data B / Plan Cost，严格对比口径）
     # ------------------------------------------------------------------ #
-    def edit_data_b(
+    def clear_data_b(
         self,
         entries: list[DataBEntry],
         order: OrderData,
         diffs: list[str],
         item_no_map: dict[str, str] | None = None,
     ) -> SapResult:
-        """按行覆盖 Data B（人工成本）行；口径与创建 fill_lab_cost_entries 一致。
+        """Data B 同步第一段：与 Excel 对比，有差异则两阶段删空（不写入任何数据）。
 
-        逐行（按物理 row）对比执行部门/费率成本中心/固定价格，仅差异才写（覆盖效果，更省）。
-        SAP 行数多于本次写入的多余行（Excel 无）→ 末行往前删（Data B 专用删除按钮 btnTABLOESCH）。
+        与 write_data_b() 之间**必须隔一次 save + open_order**，这是 SAP 硬约束：
+        成本表(KOSTENSAETZE) 每行都是对执行部门表(ZULEISTENDE) 成本中心的引用，SAP 校验
+        "该费率行成本中心是否为本订单贡献成本中心"，同一 dialog 内不认未落库的新增行。
+        删除已消耗一次 PAI 往返 → 此后同屏写成本表必报 ZR520
+        (No contributing cost centre exists for the order specific hourly rate)。
+        删除单独提交后表回到干净空状态，重进再写即等价于创建路径(VA01)，实测通过。
+
+        一致性短路：SAP 与 Excel 内容一致时不删不写，返回 changed=False，调用方据此免掉
+        中途保存（纯更新且无变化的订单零额外开销）。
+
+        Returns:
+            SapResult: changed=True 表示已删空、待 write_data_b 重建；changed=False 表示无差异跳过。
+        """
+        base = "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312"
+        try:
+            self.session.press("wnd[0]/usr/subSUBSCREEN_HEADER:SAPMV45A:4021/btnBT_HEAD")
+            self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14")
+
+            # 对比用已 remap 的 entries：POSNR 存的是 SAP 真实号。映射此刻可能尚未建立
+            # （改号 item 的真实号只有落库后才有），比不上只会判"不一致"→ 走重建，方向安全。
+            expected = self._remap_data_b_items(entries, item_no_map)
+            zul, kos, truncated = self._read_data_b_snapshot(base)
+            if truncated:
+                diffs.append("Data B 行数可能被截断（超出可见行），按有差异处理")
+            else:
+                diff_desc = self._data_b_diff(zul, kos, expected, order)
+                if not diff_desc:
+                    return SapResult(
+                        step="clear_data_b",
+                        changed=False,
+                        warning=True,
+                        message="Data B 与 Excel 一致，已跳过",
+                    )
+                diffs.append(diff_desc)
+
+            # 分两阶段删空，规避两个子表行数不一致：强制成本中心行只在 ZULEISTENDE
+            # (执行部门) 有行、KOSTENSAETZE (费率/POSNR/固定价格) 无行。
+            # 先按费率(KOSTENSAETZE)行数删配对行（两表同选同删），再删剩余执行部门
+            # (ZULEISTENDE) 独占的强制行（只选执行部门表）。若沿用"同行号双表同删"，
+            # 删到强制行时会去选 KOSTENSAETZE 上不存在/无值的行 → 费率成本中心报错。
+            kos_rows = self._count_data_b_kos_rows(base)
+            for row in range(kos_rows - 1, -1, -1):
+                self._delete_data_b_row(base, row)
+            remaining = self._count_existing_data_b_rows(base)
+            for row in range(remaining - 1, -1, -1):
+                self._delete_data_b_zul_row(base, row)
+        except Exception as exc:
+            return SapResult.fail(f"Data B 清空失败，{exc}", step="clear_data_b")
+
+        diffs.append(f"Data B 有差异：已删除旧 {len(zul)} 行待重建")
+        return SapResult(step="clear_data_b", changed=True, message="；".join(diffs))
+
+    def write_data_b(
+        self,
+        entries: list[DataBEntry],
+        order: OrderData,
+        diffs: list[str],
+        item_no_map: dict[str, str] | None = None,
+    ) -> SapResult:
+        """Data B 同步第二段：从空表重建全部行；写入口径与创建 fill_lab_cost_entries 同源。
+
+        前置条件（调用方保证）：clear_data_b() 已删空、且其后已 save + open_order——
+        执行部门行落库成为贡献成本中心后，写成本表才不会报 ZR520（见 clear_data_b 文档）。
+        open_order 会重置页面，故此处重新导航进抬头 T\\14 页签。
 
         Args:
             item_no_map: 中途 save+open 后建立的 ODM→SAP item 号映射；新增被 SAP 改号的
@@ -831,101 +897,145 @@ class OrderEditTransaction:
                 （见 .claude/plan/va02_edit_item_add_midsave.md）。未传或未命中时用原号。
 
         Note:
-            - 订单价值(AUFTRAGSWERT) 已从本方法剥离，改由 edit_order_value() 独立步骤对比更新。
-            - 已知限制：Data B 某些状态的行无法覆盖，该状态本就不应更新，不做运行时防护。
+            订单价值(AUFTRAGSWERT) 已从本方法剥离，改由 edit_order_value() 独立步骤对比更新。
         """
-        result = SapResult(step="edit_data_b")
-        base = "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312"
         try:
             self.session.press("wnd[0]/usr/subSUBSCREEN_HEADER:SAPMV45A:4021/btnBT_HEAD")
             self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14")
-            existing_rows = self._count_existing_data_b_rows(base)
-
-            # 表格行与 config 强制成本中心行分开处理：前者按行覆盖全部列，
-            # 后者只覆盖执行部门列，且恒排在表格行之后。
-            normal = [e for e in entries if not e.kostl_only]
-            forced = [e for e in entries if e.kostl_only]
-
-            written = 0
-            for row, entry in enumerate(normal):
-                performer = (entry.performer_cost_center or "").strip()
-                rate = (entry.rate_cost_center or performer).strip()
-                raw_item = (entry.item or "").strip()
-                item_no = raw_item.split(";", 1)[0].strip() if raw_item else ""
-                # 新增改号 item：用 save+open 回读的 SAP 实际号定位，避免 POSNR 指向错误 item。
-                # 映射值为空时保留原 ODM 号——绝不因映射缺失把 POSNR/ZPOSITION 写成空。
-                if item_no and item_no_map:
-                    mapped = item_no_map.get(item_no)
-                    if mapped:
-                        item_no = mapped
-                if not performer and not rate:
-                    continue
-
-                # written 取"已写入的最大物理行 + 1"，跳过条目留下的空洞不会被后续
-                # 强制行或删除逻辑当成可占用的行。
-                written = row + 1
-                self._compare_and_set(
-                    f"{base}/tblSAPMV45AZULEISTENDE/ctxtTABL-KOSTL[0,{row}]",
-                    performer,
-                    field=f"DataB[{row}]执行部门",
-                    diffs=diffs,
-                )
-                if item_no and order.sales_group != "240":
-                    self._compare_and_set(
-                        f"{base}/tblSAPMV45AZULEISTENDE/txtTABL-ZPOSITION[1,{row}]",
-                        item_no,
-                        field=f"DataB[{row}]item",
-                        diffs=diffs,
-                    )
-                self._compare_and_set(
-                    f"{base}/tblSAPMV45AKOSTENSAETZE/ctxtTABD-KOSTL[0,{row}]",
-                    rate,
-                    field=f"DataB[{row}]费率中心",
-                    diffs=diffs,
-                )
-                if item_no and order.sales_group != "240":
-                    self._compare_and_set(
-                        f"{base}/tblSAPMV45AKOSTENSAETZE/txtTABD-POSNR[1,{row}]",
-                        item_no,
-                        field=f"DataB[{row}]POSNR",
-                        diffs=diffs,
-                    )
-                self._compare_and_set(
-                    f"{base}/tblSAPMV45AKOSTENSAETZE/txtTABD-FESTPREIS[5,{row}]",
-                    entry.amount,
-                    field=f"DataB[{row}]固定价格",
-                    diffs=diffs,
-                    amount=True,
-                )
-
-            # 正常 Excel 行写完后，先把其后的全部现存行删光，保证 SAP 与 Excel 完全一致，
-            # 再从末尾追加强制成本中心行——避免旧表格行/旧强制行的费率中心、固定价格残留。
-            # 不复用已有强制行前缀：强制行统一"删旧重加"，语义简单且结果幂等。
-            for row in range(existing_rows - 1, written - 1, -1):
-                try:
-                    performer = (self.session.read_text(
-                        f"{base}/tblSAPMV45AZULEISTENDE/ctxtTABL-KOSTL[0,{row}]"
-                    ) or "").strip()
-                except SapUiError:
-                    performer = ""
-                self._delete_data_b_row(base, row)
-                diffs.append(f"DataB[{row}](执行部门{performer}):期望外,已删除")
-
-            # SAP 已与 Excel 一致，从 written 起逐行追加强制成本中心行。
-            for offset in range(len(forced)):
-                row = written + offset
-                cost_center = (forced[offset].performer_cost_center or "").strip()
-                if not cost_center:
-                    continue
-                kostl_id = f"{base}/tblSAPMV45AZULEISTENDE/ctxtTABL-KOSTL[0,{row}]"
-                self.session.set_text(kostl_id, cost_center)
-                self.session.focus(kostl_id, len(cost_center))
-                self.session.send_vkey(0)
-                diffs.append(f"DataB[{row}]执行部门:强制成本中心 {cost_center} 已录入")
+            rebuilt = self._remap_data_b_items(entries, item_no_map)
+            self._base._write_lab_cost_rows(rebuilt, order)
         except Exception as exc:
-            return SapResult.fail(f"Data B 编辑失败，{exc}", step="edit_data_b")
-        result.message = "；".join(diffs) if diffs else "Data B 无差异"
-        return result
+            return SapResult.fail(f"Data B 重建失败，{exc}", step="write_data_b")
+
+        normal_count = sum(1 for e in entries if not e.kostl_only)
+        forced_count = sum(1 for e in entries if e.kostl_only)
+        diffs.append(f"Data B 重建：正常 {normal_count} 行 + 强制 {forced_count} 行")
+        return SapResult(step="write_data_b", message="；".join(diffs))
+
+    def _read_data_b_snapshot(
+        self,
+        base: str,
+        max_rows: int = 50,
+    ) -> tuple[list[tuple[str, str]], list[tuple[str, str]], bool]:
+        """读 Data B 当前内容快照，供与 Excel 比对。
+
+        Returns:
+            (zul, kos, truncated)：
+              - zul: [(执行部门成本中心, item)]，含强制行；以执行部门列为空判停。
+              - kos: [(POSNR, 固定价格原文)]，不含强制行；以固定价格列为空判停。
+              - truncated: 任一表读满 max_rows，行数可能被可见行数截断，结果不可信。
+
+        绝不读费率成本中心 ctxtTABD-KOSTL：强制行该格为空/不可编辑，读取会中断 SAP 流程。
+        该列改由构建侧不变量推定——正常行费率成本中心恒等于执行部门成本中心
+        （sap_order_mixin 两者同取 sub 表 Sub Site Cost Center）。
+        """
+        zul: list[tuple[str, str]] = []
+        kos: list[tuple[str, str]] = []
+        for row in range(max_rows):
+            try:
+                kostl = self._norm(self.session.read_text(
+                    f"{base}/tblSAPMV45AZULEISTENDE/ctxtTABL-KOSTL[0,{row}]"
+                ))
+                if not kostl:
+                    break
+                item = self._norm(self.session.read_text(
+                    f"{base}/tblSAPMV45AZULEISTENDE/txtTABL-ZPOSITION[1,{row}]"
+                ))
+            except SapUiError:
+                break
+            zul.append((kostl, item))
+        for row in range(max_rows):
+            try:
+                festpreis = self._norm(self.session.read_text(
+                    f"{base}/tblSAPMV45AKOSTENSAETZE/txtTABD-FESTPREIS[5,{row}]"
+                ))
+                if not festpreis:
+                    break
+                posnr = self._norm(self.session.read_text(
+                    f"{base}/tblSAPMV45AKOSTENSAETZE/txtTABD-POSNR[1,{row}]"
+                ))
+            except SapUiError:
+                break
+            kos.append((posnr, festpreis))
+        return zul, kos, len(zul) >= max_rows or len(kos) >= max_rows
+
+    @classmethod
+    def _data_b_diff(
+        cls,
+        zul: list[tuple[str, str]],
+        kos: list[tuple[str, str]],
+        entries: list[DataBEntry],
+        order: OrderData,
+    ) -> str:
+        """比对 SAP 快照与 Excel entries，返回差异描述；**空串表示一致**（无需删空重建）。
+
+        一律用**多重集**比对，不比行序：SAP 会按成本中心号重排行，行序不可依赖。
+        三组全等才算一致：
+          1. 执行部门成本中心 ↔ 全部 entries（正常行 + config 强制行）；
+          2. 固定价格 ↔ 正常行金额（.2f 归一，规避千分位/小数位显示差异）；
+          3. item/POSNR ↔ 正常行 item——仅 sales_group != '240' 时比，240 订单本就不写 item 号。
+        费率成本中心不参与比对（不可读），由"费率==执行部门"不变量间接覆盖；
+        若有人在 SAP 手工改成不同值，本方法会漏判为一致，属已知限制。
+
+        差异描述带上两侧实际值：SAP 回读格式与 Excel 不同（如金额小数分隔符、item 前导零）
+        会让比对恒不相等、短路永不生效，日志里能直接看出是格式问题还是真实数据差异。
+        """
+        normal = [e for e in entries if not e.kostl_only]
+        sap_centers = Counter(cls._norm(z[0]) for z in zul)
+        excel_centers = Counter(cls._norm(e.performer_cost_center) for e in entries)
+        if sap_centers != excel_centers:
+            return f"成本中心不同 SAP={cls._fmt_bag(sap_centers)} Excel={cls._fmt_bag(excel_centers)}"
+
+        sap_amounts = Counter(cls._norm_amount(k[1]) for k in kos)
+        excel_amounts = Counter(cls._norm_amount(e.amount) for e in normal)
+        if sap_amounts != excel_amounts:
+            return f"金额不同 SAP={cls._fmt_bag(sap_amounts)} Excel={cls._fmt_bag(excel_amounts)}"
+
+        if order.sales_group == "240":
+            return ""
+        # item 为空的行不写 POSNR/ZPOSITION（写入侧 `if item_no` 守卫），比对两侧同样排除空值。
+        excel_items = Counter(
+            no for no in (cls._first_item_no(e.item) for e in normal) if no
+        )
+        sap_zul_items = Counter(cls._norm(z[1]) for z in zul if cls._norm(z[1]))
+        sap_kos_items = Counter(cls._norm(k[0]) for k in kos if cls._norm(k[0]))
+        if sap_zul_items != excel_items or sap_kos_items != excel_items:
+            return (
+                f"item 不同 SAP执行部门={cls._fmt_bag(sap_zul_items)} "
+                f"SAP费率={cls._fmt_bag(sap_kos_items)} Excel={cls._fmt_bag(excel_items)}"
+            )
+        return ""
+
+    @staticmethod
+    def _fmt_bag(bag: Counter) -> str:
+        """多重集渲染为稳定可读文本（排序去随机性），重复项按次数展开，供差异日志比对。"""
+        return "[" + ",".join(sorted(bag.elements())) + "]"
+
+    @staticmethod
+    def _first_item_no(item) -> str:
+        """取首个 ";" 前的 item 号，与写入侧 _write_lab_cost_rows 的单值裁剪口径一致。"""
+        raw = OrderEditTransaction._norm(item)
+        return raw.split(";", 1)[0].strip() if raw else ""
+
+    @staticmethod
+    def _remap_data_b_items(
+        entries: list[DataBEntry],
+        item_no_map: dict[str, str] | None,
+    ) -> list[DataBEntry]:
+        """把 entries 中新增改号 item 的 ODM 号替换为 SAP 真实号，供 POSNR/ZPOSITION 定位。
+
+        item_no_map 为空/未命中时原样返回（绝不把 item 写成空）；强制行 item 恒为空，不受影响。
+        取首个 ";" 前的 item 号做映射，与写入侧 _write_lab_cost_rows 的单值裁剪口径一致。
+        """
+        if not item_no_map:
+            return entries
+        rebuilt: list[DataBEntry] = []
+        for entry in entries:
+            raw = (entry.item or "").strip()
+            first = raw.split(";", 1)[0].strip() if raw else ""
+            mapped = item_no_map.get(first) if first else None
+            rebuilt.append(replace(entry, item=mapped) if mapped else entry)
+        return rebuilt
 
     def _delete_data_b_row(self, base: str, row: int) -> None:
         """删除 Data B 指定行（见用户 SAP 录屏）：选中 ZULEISTENDE/KOSTENSAETZE 两个子表的该行
@@ -944,8 +1054,20 @@ class OrderEditTransaction:
         self.session.press(f"{base}/btnTABLOESCH")
         self._try_press("wnd[1]/usr/btnSPOP-OPTION1")
 
+    def _delete_data_b_zul_row(self, base: str, row: int) -> None:
+        """删除只在 ZULEISTENDE(执行部门) 存在、KOSTENSAETZE 无对应行的强制成本中心行。
+
+        强制行只写了执行部门，费率子表 KOSTENSAETZE 没有该行，故只选中 ZULEISTENDE 的该行、
+        聚焦执行部门格再按删除按钮 btnTABLOESCH，绝不触碰 KOSTENSAETZE（否则费率列报错）。
+        """
+        zul = f"{base}/tblSAPMV45AZULEISTENDE"
+        self.session.find(zul).getAbsoluteRow(row).selected = True
+        self.session.focus(f"{zul}/ctxtTABL-KOSTL[0,{row}]", 0)
+        self.session.press(f"{base}/btnTABLOESCH")
+        self._try_press("wnd[1]/usr/btnSPOP-OPTION1")
+
     def _count_existing_data_b_rows(self, base: str, max_rows: int = 50) -> int:
-        """扫 Data B 执行部门列(ZULEISTENDE/ctxtTABL-KOSTL)到空行，返回现有行数。"""
+        """扫 Data B 执行部门列(ZULEISTENDE/ctxtTABL-KOSTL)到空行，返回现有行数（含强制行）。"""
         count = 0
         for row in range(max_rows):
             try:
@@ -955,6 +1077,26 @@ class OrderEditTransaction:
             except SapUiError:
                 break
             if not kostl:
+                break
+            count += 1
+        return count
+
+    def _count_data_b_kos_rows(self, base: str, max_rows: int = 50) -> int:
+        """扫 Data B 固定价格列(KOSTENSAETZE/txtTABD-FESTPREIS)到空行，返回费率子表行数（不含强制行）。
+
+        强制成本中心行在 KOSTENSAETZE 无行，故此计数 = 配对(正常)行数，用于两阶段删除的第一阶段。
+        用固定价格列而非费率列(ctxtTABD-KOSTL) 计数：后者是"不可操作/读会中断 SAP"的敏感元素，
+        正常行的固定价格恒有值（写入侧总以 .2f 落 "0.00"），计数等价且安全。
+        """
+        count = 0
+        for row in range(max_rows):
+            try:
+                festpreis = (self.session.read_text(
+                    f"{base}/tblSAPMV45AKOSTENSAETZE/txtTABD-FESTPREIS[5,{row}]"
+                ) or "").strip()
+            except SapUiError:
+                break
+            if not festpreis:
                 break
             count += 1
         return count
