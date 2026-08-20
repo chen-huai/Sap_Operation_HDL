@@ -208,5 +208,35 @@ class EditItemsMatchTest(unittest.TestCase):
         self.assertEqual(diffs, ["item 20 物料 T20-405-00 金额 0.00：SAP 有、Excel 无，已跳过"])
 
 
+class EditItemsAmountTotalTest(unittest.TestCase):
+    """未税加和口径：item 写完后回概览全量重读 Σ VBAP-NETWR，与订单价值/创建路径同源。"""
+
+    def test_total_includes_sap_only_items(self):
+        # SAP 有 item 20（Excel 无）→ 也必须计入加和，否则加和小于 SAP 订单真实总额。
+        preset = {
+            **_existing_row("10", "T75-405-00", 0, amount="5000.00"),
+            **_existing_row("20", "T20-405-00", 1, amount="1234.56"),
+        }
+        preset[CONDITION_ID] = _Element("5000.00")
+        tx, _ = _make_tx(preset)
+        order = _order(OrderItemData(item="10", material_code="T75-405-00", revenue=5000.0))
+
+        result = tx.edit_items(order, [])
+
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(result.sap_amount_vat, "6,234.56")
+
+    def test_single_item_uses_same_sum_path(self):
+        # 单 item 不再走"取最后一次读到的净值文本"分支，与多 item 同口径同格式。
+        preset = _existing_row("10", "T75-405-00", 0, amount="5000.00")
+        preset[CONDITION_ID] = _Element("5000.00")
+        tx, _ = _make_tx(preset)
+        order = _order(OrderItemData(item="10", material_code="T75-405-00", revenue=5000.0))
+
+        result = tx.edit_items(order, [])
+
+        self.assertEqual(result.sap_amount_vat, "5,000.00")
+
+
 if __name__ == "__main__":
     unittest.main()
