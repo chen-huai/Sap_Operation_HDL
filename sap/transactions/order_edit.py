@@ -50,8 +50,14 @@ class OrderEditTransaction:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _norm(value) -> str:
-        """文本归一化：None→空串、去首尾空白，统一对比口径。"""
-        return ("" if value is None else str(value)).strip()
+        """文本归一化：None→空串、换行统一为 \\n、去首尾空白，统一对比口径。
+
+        换行归一是必需的：SAP 多行文本控件（售达方文本 T\\10、item 长文本）回读用 \\r\\n，
+        Excel 侧是 \\n，只 strip 首尾会让"一字不差"的文本每次都判为差异并重写（实测已确认）。
+        """
+        if value is None:
+            return ""
+        return str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
 
     @staticmethod
     def _norm_amount(value) -> str:
@@ -65,6 +71,19 @@ class OrderEditTransaction:
         except (TypeError, ValueError):
             return OrderEditTransaction._norm(value)
 
+    @staticmethod
+    def _norm_number(value) -> str:
+        """数值归一化：去千分位后按 float 值比对，尾随零不影响；无法解析时退回文本归一化。
+
+        与 _norm_amount 的区别：不强制 .2f——汇率等字段需要保留原始精度语义。
+        SAP 回读汇率带尾随零（`7.10000`）而 Excel 是 `7.1`，文本比对会每次误判为差异、
+        重写汇率并连带触发币种/汇率联动弹窗排空（实测已确认）。
+        """
+        try:
+            return repr(float(str(value).replace(",", "")))
+        except (TypeError, ValueError):
+            return OrderEditTransaction._norm(value)
+
     def _compare_and_set(
         self,
         element_id: str,
@@ -74,8 +93,10 @@ class OrderEditTransaction:
         diffs: list[str],
         is_key: bool = False,
         amount: bool = False,
+        numeric: bool = False,
+        prefix_field: bool = True,
     ) -> bool:
-        """读现值 → 对比 → 仅差异才写，并记录 `字段:旧→新` 到 diffs。
+        """读现值 → 对比 → 仅差异才写，并记录 `字段:旧→新` 到 diffs（空值统一显示 `(空)`）。
 
         Args:
             element_id: SAP 控件 ID。
@@ -84,6 +105,9 @@ class OrderEditTransaction:
             diffs: 差异收集列表（原地追加）。
             is_key: 下拉框走 read_key/set_key（key 与显示文本不同口径），否则 read_text/set_text。
             amount: 金额字段，按 .2f 口径归一化对比。
+            numeric: 数值字段（如汇率），按 float 值比对（尾随零不算差异），写入仍用原值。
+            prefix_field: 摘要是否带 `字段:` 前缀。多字段共段（如 Header）需要区分故为 True；
+                单字段独立成段（如订单价值，段名已由 mixin 提供）传 False 避免 `订单价值:订单价值:` 双重前缀。
 
         Returns:
             bool: 是否发生了写入（有差异）。
@@ -95,16 +119,26 @@ class OrderEditTransaction:
             diffs.append(f"{field}:控件读取失败(待校正控件ID)")
             return False
 
-        cur_norm = self._norm_amount(current) if amount else self._norm(current)
-        new_norm = self._norm_amount(new_value) if amount else self._norm(new_value)
+        if amount:
+            cur_norm, new_norm = self._norm_amount(current), self._norm_amount(new_value)
+        elif numeric:
+            # 只用于"是否相等"的判定；写入与摘要仍用原值，避免把 7.1 写成 repr 形态。
+            cur_norm, new_norm = self._norm_number(current), self._norm_number(new_value)
+        else:
+            cur_norm, new_norm = self._norm(current), self._norm(new_value)
         if cur_norm == new_norm:
             return False
 
+        written = new_norm if amount else self._norm(new_value)
         if is_key:
             self.session.set_key(element_id, self._norm(new_value))
         else:
-            self.session.set_text(element_id, new_norm if amount else self._norm(new_value))
-        diffs.append(f"{field}:{self._norm(current)}→{new_norm if amount else self._norm(new_value)}")
+            self.session.set_text(element_id, written)
+        # 空值统一渲染 `(空)`，避免 `订单价值:3,021.26→` 结尾空白看不出目标被清空。
+        label = f"{field}:" if prefix_field else ""
+        old_disp = self._norm(current) or "(空)"
+        new_disp = written or "(空)"
+        diffs.append(f"{label}{old_disp}→{new_disp}")
         return True
 
     # ------------------------------------------------------------------ #
@@ -165,7 +199,7 @@ class OrderEditTransaction:
         self.session.focus(sold_to_id, len(new_value))
         self.session.send_vkey(0)
         self._confirm_sold_to_dialogs()
-        diffs.append(f"售达方(SAP No):{self._norm(current)}→{new_value}")
+        diffs.append(f"售达方(SAP No):{self._norm(current) or '(空)'}→{new_value or '(空)'}")
 
     def _confirm_sold_to_dialogs(self) -> None:
         """动态排空改售达方后 SAP 弹出的联动重算弹窗。
@@ -225,7 +259,10 @@ class OrderEditTransaction:
                 "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\01/"
                 "ssubSUBSCREEN_BODY:SAPMV45A:4301/ctxtVBKD-KURSK"
             )
-            if self._compare_and_set(rate_id, order.exchange_rate, field="汇率", diffs=diffs):
+            # numeric 比对：SAP 回读 7.10000、Excel 是 7.1，文本比对会每次重写汇率并触发联动弹窗。
+            if self._compare_and_set(
+                rate_id, order.exchange_rate, field="汇率", diffs=diffs, numeric=True
+            ):
                 self.session.focus(rate_id, 8)
                 self.session.send_vkey(0)
                 self._dismiss_popups()
@@ -787,20 +824,24 @@ class OrderEditTransaction:
     ) -> str:
         """命中 item 的单行汇总：只列真正变化的字段；无变化返回空串(调用方不输出)。
 
-        例：`item 10 物料 ABC 金额 500 → 400.00，币种 USD → CNY`。
+        箭头格式与全局统一：`旧→新`（无空格），空值渲染 `(空)`。
+        例：`item 10 物料 ABC 金额 500.00→400.00，币种 USD→CNY`。
         """
+        def _arrow(diff: tuple[bool, str, str]) -> str:
+            return f"{diff[1] or '(空)'}→{diff[2] or '(空)'}"
+
         parts: list[str] = []
         if amount_diff is None:
             parts.append("金额读取失败")
         elif amount_diff[0]:
-            parts.append(f"金额 {amount_diff[1]} → {amount_diff[2]}")
+            parts.append(f"金额 {_arrow(amount_diff)}")
         if currency_diff and currency_diff[0]:
-            parts.append(f"币种 {currency_diff[1]} → {currency_diff[2]}")
+            parts.append(f"币种 {_arrow(currency_diff)}")
         if item.long_text:
             if text_diff is None:
                 parts.append("文本读取失败")
             elif text_diff[0]:
-                parts.append(f"文本 {text_diff[1]} → {text_diff[2]}")
+                parts.append(f"文本 {_arrow(text_diff)}")
         if not parts:
             return ""
         head = f"item {self._norm(item.item)} 物料 {self._norm(item.material_code)}"
@@ -848,18 +889,25 @@ class OrderEditTransaction:
             # （改号 item 的真实号只有落库后才有），比不上只会判"不一致"→ 走重建，方向安全。
             expected = self._remap_data_b_items(entries, item_no_map)
             zul, kos, truncated = self._read_data_b_snapshot(base)
+            # 费率成本中心列是否真读到，直接写进消息：这是"该列可否读"的实机结论，
+            # 读到即比对四组（费率被人工改过也能发现），读不到则降级三组。
+            rate_note = "含费率中心" if self._rate_centers_readable(kos) else "费率中心未读到"
             if truncated:
-                diffs.append("Data B 行数可能被截断（超出可见行），按有差异处理")
+                diffs.append(
+                    f"Data B 读满 {len(zul)}/{len(kos)} 行（判停失效，疑似空行回读非空），按有差异处理"
+                )
             else:
                 diff_desc = self._data_b_diff(zul, kos, expected, order)
                 if not diff_desc:
                     return SapResult(
                         step="clear_data_b",
                         changed=False,
-                        warning=True,
-                        message="Data B 与 Excel 一致，已跳过",
+                        message=f"Data B 与 Excel 一致，已跳过（{rate_note}）",
                     )
-                diffs.append(diff_desc)
+                diffs.append(f"{diff_desc}（{rate_note}）")
+            # 判定为有差异时一并输出两表原文快照与 Excel 期望值：归一化后的比对结果看不出
+            # 根因（回读格式、编号体系、多余空行都会导致"看起来一样却判不一致"）。
+            diffs.append(self._data_b_snapshot_note(zul, kos, expected))
 
             # 分两阶段删空，规避两个子表行数不一致：强制成本中心行只在 ZULEISTENDE
             # (执行部门) 有行、KOSTENSAETZE (费率/POSNR/固定价格) 无行。
@@ -916,21 +964,24 @@ class OrderEditTransaction:
         self,
         base: str,
         max_rows: int = 50,
-    ) -> tuple[list[tuple[str, str]], list[tuple[str, str]], bool]:
+    ) -> tuple[list[tuple[str, str]], list[tuple[str, str, str]], bool]:
         """读 Data B 当前内容快照，供与 Excel 比对。
 
         Returns:
             (zul, kos, truncated)：
               - zul: [(执行部门成本中心, item)]，含强制行；以执行部门列为空判停。
-              - kos: [(POSNR, 固定价格原文)]，不含强制行；以固定价格列为空判停。
+              - kos: [(费率成本中心, POSNR, 固定价格原文)]，不含强制行；以固定价格列为空判停。
               - truncated: 任一表读满 max_rows，行数可能被可见行数截断，结果不可信。
 
-        绝不读费率成本中心 ctxtTABD-KOSTL：强制行该格为空/不可编辑，读取会中断 SAP 流程。
-        该列改由构建侧不变量推定——正常行费率成本中心恒等于执行部门成本中心
-        （sap_order_mixin 两者同取 sub 表 Sub Site Cost Center）。
+        费率成本中心 `ctxtTABD-KOSTL` 只读、只读**配对行**：以固定价格判停保证 row 落在成本表
+        真实存在的行上（强制成本中心行在成本表没有行，永远不会被读到）。原"该列不可读"的说法
+        缺实测依据——历史证据只支持"**聚焦/写入**强制行的该格会中断 SAP"，而正常行的写入
+        (`order.py::_write_lab_cost_rows`) 一直在 set_text 这个控件。
+        单独兜住该列的读取异常：读不到就退回空串，比对侧据此跳过费率组（降级为原三组口径），
+        绝不因读不到而中断快照或恒判不一致。
         """
         zul: list[tuple[str, str]] = []
-        kos: list[tuple[str, str]] = []
+        kos: list[tuple[str, str, str]] = []
         for row in range(max_rows):
             try:
                 kostl = self._norm(self.session.read_text(
@@ -956,60 +1007,139 @@ class OrderEditTransaction:
                 ))
             except SapUiError:
                 break
-            kos.append((posnr, festpreis))
+            try:
+                rate = self._norm(self.session.read_text(
+                    f"{base}/tblSAPMV45AKOSTENSAETZE/ctxtTABD-KOSTL[0,{row}]"
+                ))
+            except SapUiError:
+                rate = ""
+            kos.append((rate, posnr, festpreis))
         return zul, kos, len(zul) >= max_rows or len(kos) >= max_rows
 
     @classmethod
     def _data_b_diff(
         cls,
         zul: list[tuple[str, str]],
-        kos: list[tuple[str, str]],
+        kos: list[tuple[str, str, str]],
         entries: list[DataBEntry],
         order: OrderData,
     ) -> str:
         """比对 SAP 快照与 Excel entries，返回差异描述；**空串表示一致**（无需删空重建）。
 
-        一律用**多重集**比对，不比行序：SAP 会按成本中心号重排行，行序不可依赖。
-        三组全等才算一致：
-          1. 执行部门成本中心 ↔ 全部 entries（正常行 + config 强制行）；
-          2. 固定价格 ↔ 正常行金额（.2f 归一，规避千分位/小数位显示差异）；
-          3. item/POSNR ↔ 正常行 item——仅 sales_group != '240' 时比，240 订单本就不写 item 号。
-        费率成本中心不参与比对（不可读），由"费率==执行部门"不变量间接覆盖；
-        若有人在 SAP 手工改成不同值，本方法会漏判为一致，属已知限制。
+        两张表口径不同（用户 2026-08-20 定稿），都不比行序（SAP 按成本中心号重排）：
+
+        ① **执行部门表按集合"包含"判定**——只看成本中心，要求 Excel 正常行 + config 强制行的
+           全部成本中心都出现在 SAP 侧即可。不用多重集：SAP 的贡献成本中心清单同一成本中心
+           通常只保留一行，而 Excel 可能有多行同中心（不同 item/金额），数量天然对不上。
+           item 列(ZPOSITION) 不参与——item 的正确性由成本表 POSNR 覆盖。
+           **代价**：SAP 多出的执行部门成本中心不触发重建（与"多一个贡献中心不影响业务"的
+           强制成本中心行语义一致）。
+
+        ② **成本表按行三字段严格比对**——(费率成本中心, POSNR, 固定价格) 三元组的多重集必须
+           完全相等。用三元组而非三列各自比：三列独立比会把"两行之间金额互换"误判为一致。
+           降级规则：费率列读不到 → 两侧该位置置空（退化为 POSNR+金额）；
+           sales_group == '240' 不写 item 号 → 两侧 POSNR 置空。
 
         差异描述带上两侧实际值：SAP 回读格式与 Excel 不同（如金额小数分隔符、item 前导零）
         会让比对恒不相等、短路永不生效，日志里能直接看出是格式问题还是真实数据差异。
         """
         normal = [e for e in entries if not e.kostl_only]
-        sap_centers = Counter(cls._norm(z[0]) for z in zul)
-        excel_centers = Counter(cls._norm(e.performer_cost_center) for e in entries)
-        if sap_centers != excel_centers:
-            return f"成本中心不同 SAP={cls._fmt_bag(sap_centers)} Excel={cls._fmt_bag(excel_centers)}"
 
-        sap_amounts = Counter(cls._norm_amount(k[1]) for k in kos)
-        excel_amounts = Counter(cls._norm_amount(e.amount) for e in normal)
-        if sap_amounts != excel_amounts:
-            return f"金额不同 SAP={cls._fmt_bag(sap_amounts)} Excel={cls._fmt_bag(excel_amounts)}"
-
-        if order.sales_group == "240":
-            return ""
-        # item 为空的行不写 POSNR/ZPOSITION（写入侧 `if item_no` 守卫），比对两侧同样排除空值。
-        excel_items = Counter(
-            no for no in (cls._first_item_no(e.item) for e in normal) if no
-        )
-        sap_zul_items = Counter(cls._norm(z[1]) for z in zul if cls._norm(z[1]))
-        sap_kos_items = Counter(cls._norm(k[0]) for k in kos if cls._norm(k[0]))
-        if sap_zul_items != excel_items or sap_kos_items != excel_items:
+        # ① 执行部门表：Excel(含强制行) 的成本中心必须都在 SAP 侧。
+        #    编号一律走 _norm_no 去前导零——SAP 的 KOSTL 是 CHAR10 定长，回读带前导零。
+        sap_centers = {cls._norm_no(z[0]) for z in zul if cls._norm_no(z[0])}
+        excel_centers = {
+            cls._norm_no(e.performer_cost_center)
+            for e in entries
+            if cls._norm_no(e.performer_cost_center)
+        }
+        missing = excel_centers - sap_centers
+        if missing:
             return (
-                f"item 不同 SAP执行部门={cls._fmt_bag(sap_zul_items)} "
-                f"SAP费率={cls._fmt_bag(sap_kos_items)} Excel={cls._fmt_bag(excel_items)}"
+                f"执行部门缺少={cls._fmt_bag(sorted(missing))} "
+                f"SAP={cls._fmt_bag(sorted(sap_centers))} Excel={cls._fmt_bag(sorted(excel_centers))}"
             )
+
+        # ② 成本表：三字段成行比对。读不到的费率列 / 240 订单的 POSNR 两侧同时置空，等价于不比该字段。
+        use_rate = cls._rate_centers_readable(kos)
+        use_item = order.sales_group != "240"
+        sap_bag = Counter(
+            (
+                cls._norm_no(k[0]) if use_rate else "",
+                cls._norm_no(k[1]) if use_item else "",
+                cls._norm_amount(k[2]),
+            )
+            for k in kos
+        )
+        excel_bag = Counter(
+            (
+                (cls._norm_no(e.rate_cost_center) or cls._norm_no(e.performer_cost_center)) if use_rate else "",
+                cls._norm_no(cls._first_item_no(e.item)) if use_item else "",
+                cls._norm_amount(e.amount),
+            )
+            for e in normal
+        )
+        if sap_bag != excel_bag:
+            return f"成本表不同 SAP={cls._fmt_bag(sap_bag)} Excel={cls._fmt_bag(excel_bag)}"
         return ""
 
+    @classmethod
+    def _data_b_snapshot_note(
+        cls,
+        zul: list[tuple[str, str]],
+        kos: list[tuple[str, str, str]],
+        entries: list[DataBEntry],
+    ) -> str:
+        """渲染两表 SAP 原文快照 + Excel 期望值，供实机定位"看起来一样却判不一致"。
+
+        输出**未归一化的原文**（金额不套 .2f、item 不裁剪），这样回读格式差异（千分位、
+        小数分隔符、前导零）能直接暴露；Excel 侧标出强制行(F)，便于核对执行部门表多出的行。
+        """
+        zul_txt = ",".join(f"{k}|{i}" for k, i in zul) or "空"
+        kos_txt = ",".join(f"{r}|{p}|{f}" for r, p, f in kos) or "空"
+        excel_txt = ",".join(
+            f"{cls._norm(e.performer_cost_center)}|{cls._norm(e.rate_cost_center)}"
+            f"|{cls._norm(e.item)}|{e.amount}{'|F' if e.kostl_only else ''}"
+            for e in entries
+        ) or "空"
+        return (
+            f"Data B 快照 执行部门[中心|item]={zul_txt} "
+            f"成本表[费率|POSNR|金额]={kos_txt} "
+            f"Excel[执行部门|费率|item|金额]={excel_txt}"
+        )
+
+    @classmethod
+    def _rate_centers_readable(cls, kos: list[tuple[str, str, str]]) -> bool:
+        """成本表费率成本中心列是否全部读到（有任一为空即视为读不到，跳过该组比对）。
+
+        无成本表行时返回 True——没有行可比，等价于"该组无差异"。
+        """
+        return all(cls._norm(k[0]) for k in kos)
+
     @staticmethod
-    def _fmt_bag(bag: Counter) -> str:
-        """多重集渲染为稳定可读文本（排序去随机性），重复项按次数展开，供差异日志比对。"""
-        return "[" + ",".join(sorted(bag.elements())) + "]"
+    def _fmt_bag(bag) -> str:
+        """多重集/集合/列表渲染为稳定可读文本（排序去随机性），供差异日志逐项比对。
+
+        元素为元组（成本表的 费率/POSNR/金额 三字段行）时用 "/" 连接；Counter 按次数展开重复项。
+        """
+        raw = bag.elements() if isinstance(bag, Counter) else bag
+        return "[" + ",".join(sorted(
+            "/".join(x) if isinstance(x, tuple) else str(x) for x in raw
+        )) + "]"
+
+    @staticmethod
+    def _norm_no(value) -> str:
+        """SAP 定长编号归一化：去前导零后再比对。
+
+        SAP 的成本中心 `KOSTL`(CHAR10) 与 item 号 `POSNR`(6 位) 回读恒带前导零
+        （实测：`0048601258` / `001000`），Excel 侧不带 ⇒ 直接比对必然不等、一致性短路
+        永不生效（症状：数据一样也走删除+保存+重建）。
+        只用于**比对**，写入一律仍用原值——SAP 会自行补零。
+        全零串归一为 "0" 而非空串，避免被后续"非空"判定当成无值。
+        """
+        raw = OrderEditTransaction._norm(value)
+        stripped = raw.lstrip("0")
+        return stripped or ("0" if raw else "")
 
     @staticmethod
     def _first_item_no(item) -> str:
@@ -1085,8 +1215,9 @@ class OrderEditTransaction:
         """扫 Data B 固定价格列(KOSTENSAETZE/txtTABD-FESTPREIS)到空行，返回费率子表行数（不含强制行）。
 
         强制成本中心行在 KOSTENSAETZE 无行，故此计数 = 配对(正常)行数，用于两阶段删除的第一阶段。
-        用固定价格列而非费率列(ctxtTABD-KOSTL) 计数：后者是"不可操作/读会中断 SAP"的敏感元素，
-        正常行的固定价格恒有值（写入侧总以 .2f 落 "0.00"），计数等价且安全。
+        用固定价格列而非费率列(ctxtTABD-KOSTL) 计数：后者在**强制行上不可聚焦/写入**（历史实测），
+        计数只需一个恒有值的列即可——正常行的固定价格总以 .2f 落 "0.00"，等价且不涉及任何写操作。
+        （费率列的只读读取见 _read_data_b_snapshot：对配对行可读，"该列不可读"的旧说法无实测依据。）
         """
         count = 0
         for row in range(max_rows):
@@ -1122,22 +1253,40 @@ class OrderEditTransaction:
                 if order_value_cny >= self.config.revenue_threshold
                 else ""
             )
+            # prefix_field=False：本段只有这一个字段、段名已由 mixin 的 _append_remark 提供，
+            # 再带 `订单价值:` 会输出 `订单价值:订单价值:3,021.26→(空)` 双重前缀。
             self._compare_and_set(
                 self._base._auftragswert_id(),
                 target,
                 field="订单价值",
                 diffs=diffs,
                 amount=True,
+                prefix_field=False,
             )
             if truncated:
                 result.warning = True
-                diffs.append("订单价值:item 行数超过扫描上限，可能少算，请人工核对")
+                diffs.append("item 行数超过扫描上限，可能少算，请人工核对")
         except Exception as exc:
             return SapResult.fail(f"订单价值编辑失败，{exc}", step="edit_order_value")
         result.message = "；".join(diffs) if diffs else "订单价值无差异"
         return result
 
     _PLAN_COST_TABLE = "wnd[0]/usr/tblSAPLKKDI1301_TC"
+
+    @classmethod
+    def _pc_center_id(cls, row: int) -> str:
+        """计划成本编辑器成本中心列(HERK2)控件 ID。"""
+        return f"{cls._PLAN_COST_TABLE}/ctxtRK70L-HERK2[3,{row}]"
+
+    @classmethod
+    def _pc_category_id(cls, row: int) -> str:
+        """计划成本编辑器类别列(HERK3，FREMDL/T01AST)控件 ID。"""
+        return f"{cls._PLAN_COST_TABLE}/ctxtRK70L-HERK3[4,{row}]"
+
+    @classmethod
+    def _pc_amount_id(cls, row: int) -> str:
+        """计划成本编辑器数量/金额列(MENGE)控件 ID。"""
+        return f"{cls._PLAN_COST_TABLE}/txtRK70L-MENGE[6,{row}]"
 
     def edit_plan_cost(
         self,
@@ -1146,14 +1295,20 @@ class OrderEditTransaction:
         *,
         target_item: str,
     ) -> SapResult:
-        """按行覆盖指定 SAP item 的计划成本：Excel 有的行逐行覆盖，Excel 没有的多余行删除。
+        """按 (成本中心,类别) 主键匹配指定 SAP item 的计划成本：仅差异才写，顺序不同不算变化。
 
         先按 item 号在 SAP item 概览页实时定位物理行（ODM 与 SAP 编号可能不同、SAP 也可能
         重排，故每次重读匹配，不用写入时的行号）。SAP 不存在该 item → 不开编辑器、成功跳过。
+        跨 item 隔离：编辑器 tblSAPLKKDI1301_TC 只含该 item 的行，entries 也来自单 item，两侧同源。
 
-        规则（用户确认，去主键匹配）：
-            - valid entries 从 row 0 逐行 `_apply_single_plan_cost_entry` 直接覆盖（TYPPS/中心/类别/数量全写）；
-            - SAP 行数多于 entries 的多余行（Excel 无）→ Shift+F2 删除，末行往前删避免行号位移。
+        规则（用户 2026-08-21 定稿，顺序无关）：
+            - 主键 = (_norm_no(成本中心), _norm(类别))，对行序免疫；
+            - Excel entry 认领同键 SAP 行 → 仅金额有差异才改 MENGE 列，日志 `金额|时间 旧→新`；
+            - Excel 有 SAP 无 → 追加到编辑器末尾（全写四列），日志 `… (空)→新`；
+            - SAP 有 Excel 无 → Shift+F2 删除（倒序，避免行号位移），日志 `…：Excel 无，已删除`；
+            - 全认领且金额全等（含顺序不同）→ 零写入零回车，`Plan Cost 无差异`。
+
+        执行顺序：①改金额（行号稳定先做）→ ②倒序删多余 → ③追加新增（删后重读行数取起始 row）。
         """
         result = SapResult(step="edit_plan_cost")
         try:
@@ -1169,18 +1324,48 @@ class OrderEditTransaction:
             valid = [e for e in entries if e.cost_center]
             existing = self._read_existing_plan_cost_rows()  # [(row, cost_center, category, amount)]
 
-            # Excel 有的行：从 row 0 逐行覆盖（不再按成本中心+类别匹配，直接按位置全写）。
-            for row, entry in enumerate(valid):
-                self._base._apply_single_plan_cost_entry(row, entry)
-                diffs.append(self._plan_cost_overwrite_summary(entry))
+            # SAP 行按 (归一中心,类别) 主键分组，供 Excel entry 认领（对顺序免疫；同键多行按 row 升序消费）。
+            sap_by_key: dict[tuple[str, str], list[tuple[int, str, str, str]]] = {}
+            for row_tuple in existing:
+                key = (self._norm_no(row_tuple[1]), self._norm(row_tuple[2]))
+                sap_by_key.setdefault(key, []).append(row_tuple)
 
-            # Excel 没有的多余行（SAP 行数 > valid）：末行往前删，避免删除后行号位移。
-            for row, cost_center, category, amount in reversed(existing[len(valid):]):
+            # 阶段①：认领 + 仅金额差异才改（行号此时稳定，最先做）。认领不到的 entry 记为待新增。
+            matched_rows: set[int] = set()
+            to_add: list[PlanCostEntry] = []
+            for entry in valid:
+                key = (self._norm_no(entry.cost_center), self._norm(entry.category))
+                bucket = sap_by_key.get(key)
+                if bucket:
+                    row, _center, _category, old_amount = bucket.pop(0)
+                    matched_rows.add(row)
+                    summary = self._overwrite_plan_cost_amount(row, entry, old_amount)
+                    if summary:
+                        diffs.append(summary)
+                else:
+                    to_add.append(entry)
+
+            # 阶段②：SAP 有 Excel 无 → 倒序删除，避免删除后行号位移。
+            leftover = sorted(
+                (t for t in existing if t[0] not in matched_rows),
+                key=lambda t: t[0],
+                reverse=True,
+            )
+            for row, cost_center, category, amount in leftover:
                 self._delete_plan_cost_row(row)
                 label = self._plan_cost_label(category)
                 diffs.append(
                     f"{self._plan_cost_head(cost_center, category)} {label} {amount}：Excel 无，已删除"
                 )
+
+            # 阶段③：Excel 有 SAP 无 → 删后重读行数，从当前末尾逐行追加（全写四列，口径同创建）。
+            # 仅在确有新增时才重读，避免"无新增"常见场景多一次 SAP 往返。
+            if to_add:
+                next_row = len(self._read_existing_plan_cost_rows())
+                for entry in to_add:
+                    self._base._apply_single_plan_cost_entry(next_row, entry)
+                    diffs.append(self._plan_cost_add_summary(entry))
+                    next_row += 1
 
             self.session.press("wnd[0]/tbar[0]/btn[3]")
             # 退出编辑器时若弹"是否保存"确认框，按 OPTION1 兜底确认（无则跳过）。
@@ -1196,7 +1381,7 @@ class OrderEditTransaction:
         SAP 删除非"置空控件"，须定位行后触发 Shift+F2；聚焦 `HERK2[3,row]`（每行必有的
         成本中心列，即本类读写用的列）即定位该行。删除后若弹确认框，OPTION1 兜底。
         """
-        self.session.focus(f"{self._PLAN_COST_TABLE}/ctxtRK70L-HERK2[3,{row}]", 8)
+        self.session.focus(self._pc_center_id(row), 8)
         self.session.send_vkey(14)
         self._try_press("wnd[1]/usr/btnSPOP-OPTION1")
 
@@ -1217,14 +1402,14 @@ class OrderEditTransaction:
         rows: list[tuple[int, str, str, str]] = []
         for row in range(max_rows):
             try:
-                cost_center = (self.session.read_text(f"{self._PLAN_COST_TABLE}/ctxtRK70L-HERK2[3,{row}]") or "").strip()
-                category = (self.session.read_text(f"{self._PLAN_COST_TABLE}/ctxtRK70L-HERK3[4,{row}]") or "").strip()
+                cost_center = (self.session.read_text(self._pc_center_id(row)) or "").strip()
+                category = (self.session.read_text(self._pc_category_id(row)) or "").strip()
             except SapUiError:
                 break
             if not cost_center and not category:
                 break
             try:
-                amount = (self.session.read_text(f"{self._PLAN_COST_TABLE}/txtRK70L-MENGE[6,{row}]") or "").strip()
+                amount = (self.session.read_text(self._pc_amount_id(row)) or "").strip()
             except SapUiError:
                 amount = ""
             rows.append((row, cost_center, category, amount))
@@ -1238,11 +1423,30 @@ class OrderEditTransaction:
         """计划成本行抬头：`计划成本 成本中心{中心}({类别})`。"""
         return f"计划成本 成本中心{self._norm(cost_center)}({self._norm(category)})"
 
-    def _plan_cost_overwrite_summary(self, entry: PlanCostEntry) -> str:
-        """按行覆盖摘要：`计划成本 成本中心X(类别) 覆盖金额|时间 值`。"""
+    def _overwrite_plan_cost_amount(
+        self, row: int, entry: PlanCostEntry, old_amount: str
+    ) -> str:
+        """认领到同键 SAP 行后：仅金额有差异才改 MENGE 列 + 回车，返回箭头摘要；相等返回空串。
+
+        金额按 `_norm_amount`(.2f、去千分位) 归一比对，避免回读格式差异误判；
+        成本中心/类别已由主键保证一致，无需重写（也不触碰只读的强制行式布局）。
+        """
+        new_disp = format(float(entry.amount), ".2f")
+        if self._norm_amount(old_amount) == self._norm_amount(new_disp):
+            return ""
+        self.session.set_text(self._pc_amount_id(row), new_disp)
+        self.session.focus(self._pc_amount_id(row), 20)
+        self.session.send_vkey(0)
         label = self._plan_cost_label(entry.category)
         head = self._plan_cost_head(entry.cost_center, entry.category)
-        return f"{head} 覆盖{label} {format(float(entry.amount), '.2f')}"
+        old_disp = self._norm(old_amount) or "(空)"
+        return f"{head} {label} {old_disp}→{new_disp}"
+
+    def _plan_cost_add_summary(self, entry: PlanCostEntry) -> str:
+        """新增行摘要：`计划成本 成本中心X(类别) 金额|时间 (空)→值`。"""
+        label = self._plan_cost_label(entry.category)
+        head = self._plan_cost_head(entry.cost_center, entry.category)
+        return f"{head} {label} (空)→{format(float(entry.amount), '.2f')}"
 
     # ------------------------------------------------------------------ #
     # 复用创建侧 open/save

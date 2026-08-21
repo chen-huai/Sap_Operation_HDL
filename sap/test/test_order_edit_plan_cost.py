@@ -1,9 +1,9 @@
-"""VA02 编辑：计划成本按行覆盖 + 删除多余行的回归测试。
+"""VA02 编辑：计划成本主键匹配 diff + 删除多余 + 追加新增 的回归测试。
 
 覆盖：①打开编辑器容错缺失的 btnSPOP-VAROPTION1 弹窗（原报"找不到 SAP 元素"）；
-②按行覆盖 row0（全写 TYPPS/中心/类别/数量）；③中心不同也按位置覆盖、不新增；
+②认领同键行仅金额差异才改 MENGE（不重写中心/类别）；③成本中心不同→删旧行 + 末尾新增；
 ④SAP 多余行（Excel 无）用 Shift+F2 删除；⑤按 item 号（而非位置）定位 SAP 物理行；
-⑥SAP 无对应 item→成功跳过。
+⑥SAP 无对应 item→成功跳过；⑦顺序不同但内容一致→零写入零回车；⑧Excel 多出的行追加到末尾。
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from sap.transactions.order_edit import OrderEditTransaction  # noqa: E402
 TABLE = "wnd[0]/usr/tblSAPLKKDI1301_TC"
 
 
+def _typps(row): return f"{TABLE}/ctxtRK70L-TYPPS[2,{row}]"
 def _herk2(row): return f"{TABLE}/ctxtRK70L-HERK2[3,{row}]"
 def _herk3(row): return f"{TABLE}/ctxtRK70L-HERK3[4,{row}]"
 def _menge(row): return f"{TABLE}/txtRK70L-MENGE[6,{row}]"
@@ -77,7 +78,12 @@ def _item_row(item_no, material, row):
 
 
 def _existing(cost_center, category, amount, row):
-    return {_herk2(row): _Element(cost_center), _herk3(row): _Element(category), _menge(row): _Element(amount)}
+    return {
+        _typps(row): _Element("E"),
+        _herk2(row): _Element(cost_center),
+        _herk3(row): _Element(category),
+        _menge(row): _Element(amount),
+    }
 
 
 class EditPlanCostTest(unittest.TestCase):
@@ -92,34 +98,40 @@ class EditPlanCostTest(unittest.TestCase):
         result = tx.edit_plan_cost([entry], diffs, target_item="10")
         self.assertTrue(result.success, result.message)  # 弹窗缺失不再报错
 
-    def test_overwrites_row_by_position(self):
-        # 按行覆盖：row0 全写 TYPPS/中心/类别/数量（不再按主键匹配、不判差异）。
+    def test_amount_change_overwrites_menge(self):
+        # 认领同键行：仅金额有差异才改 MENGE，不重写中心/类别，日志带箭头。
         preset = {**_item_row("10", "M1", 0), **_existing("1100", "FREMDL", "100.00", 0)}
         tx, raw = _make_tx(preset, self.MISSING)
         entry = PlanCostEntry(cost_center="1100", category="FREMDL", amount=500.0)
         diffs: list[str] = []
         result = tx.edit_plan_cost([entry], diffs, target_item="10")
         self.assertTrue(result.success, result.message)
-        self.assertEqual(raw.findById(f"{TABLE}/ctxtRK70L-TYPPS[2,0]").text, "E")
-        self.assertEqual(raw.findById(_herk2(0)).text, "1100")
-        self.assertEqual(raw.findById(_herk3(0)).text, "FREMDL")
-        self.assertEqual(raw.findById(_menge(0)).text, "500.00")
-        self.assertEqual(diffs, ["计划成本 成本中心1100(FREMDL) 覆盖金额 500.00"])
+        self.assertEqual(raw.findById(_menge(0)).text, "500.00")   # 只改金额
+        self.assertEqual(raw.findById(_herk2(0)).text, "1100")     # 中心未被重写
+        self.assertEqual(raw.findById(_herk3(0)).text, "FREMDL")   # 类别未被重写
+        self.assertIn(0, raw.findById("wnd[0]").vkeys)             # 有差异→提交
+        self.assertEqual(diffs, ["计划成本 成本中心1100(FREMDL) 金额 100.00→500.00"])
 
-    def test_different_center_overwrites_in_place(self):
-        # 成本中心不同不再"新增行"，而是按位置直接覆盖 row0。
+    def test_center_mismatch_deletes_and_adds(self):
+        # 成本中心不同：主键认领不到→删除旧行(1100) + 末尾新增(2200)。
         preset = {**_item_row("10", "M1", 0), **_existing("1100", "FREMDL", "100.00", 0)}
         tx, raw = _make_tx(preset, self.MISSING)
         entry = PlanCostEntry(cost_center="2200", category="FREMDL", amount=300.0)
         diffs: list[str] = []
         result = tx.edit_plan_cost([entry], diffs, target_item="10")
         self.assertTrue(result.success, result.message)
-        self.assertEqual(raw.findById(_herk2(0)).text, "2200")  # row0 被覆盖成 2200
-        self.assertEqual(raw.findById(_menge(0)).text, "300.00")
-        self.assertEqual(diffs, ["计划成本 成本中心2200(FREMDL) 覆盖金额 300.00"])
+        # 旧行 1100 删除：聚焦 HERK2[3,0] + Shift+F2(vkey14)。
+        self.assertTrue(raw.findById(_herk2(0)).focused)
+        self.assertIn(14, raw.findById("wnd[0]").vkeys)
+        # 新行 2200 追加到末尾 row1（全写四列）。
+        self.assertEqual(raw.findById(_typps(1)).text, "E")
+        self.assertEqual(raw.findById(_herk2(1)).text, "2200")
+        self.assertEqual(raw.findById(_menge(1)).text, "300.00")
+        self.assertIn("计划成本 成本中心1100(FREMDL) 金额 100.00：Excel 无，已删除", diffs)
+        self.assertIn("计划成本 成本中心2200(FREMDL) 金额 (空)→300.00", diffs)
 
     def test_deletes_sap_extra_rows(self):
-        # 1 条 entry 覆盖 row0；SAP 多出的 row1（Excel 无）用 Shift+F2 删除。
+        # row0 金额相等→不重写；SAP 多出的 row1（Excel 无）用 Shift+F2 删除。
         preset = {
             **_item_row("10", "M1", 0),
             **_existing("1100", "FREMDL", "100.00", 0), **_existing("2200", "T01AST", "8.00", 1),
@@ -129,11 +141,48 @@ class EditPlanCostTest(unittest.TestCase):
         diffs: list[str] = []
         result = tx.edit_plan_cost([entry], diffs, target_item="10")
         self.assertTrue(result.success, result.message)
-        # row0 覆盖；row1 删除（聚焦 HERK2[3,1] + Shift+F2=vkey14）。
-        self.assertTrue(raw.findById(_herk2(1)).focused)
+        self.assertEqual(raw.findById(_menge(0)).text, "100.00")   # 金额相等未重写
+        self.assertTrue(raw.findById(_herk2(1)).focused)           # 删除聚焦 row1
         self.assertIn(14, raw.findById("wnd[0]").vkeys)
-        self.assertIn("计划成本 成本中心1100(FREMDL) 覆盖金额 100.00", diffs)
-        self.assertIn("计划成本 成本中心2200(T01AST) 时间 8.00：Excel 无，已删除", diffs)
+        self.assertEqual(diffs, ["计划成本 成本中心2200(T01AST) 时间 8.00：Excel 无，已删除"])
+
+    def test_same_content_different_order_no_change(self):
+        # 顺序不同但内容一致（含前导零中心 + 千分位金额）→ 零写入零回车、无差异。
+        preset = {
+            **_item_row("10", "M1", 0),
+            **_existing("0048601240", "FREMDL", "1,000.00", 0),
+            **_existing("0048601294", "FREMDL", "100.00", 1),
+        }
+        tx, raw = _make_tx(preset, self.MISSING)
+        entries = [
+            PlanCostEntry(cost_center="48601294", category="FREMDL", amount=100.0),
+            PlanCostEntry(cost_center="48601240", category="FREMDL", amount=1000.0),
+        ]
+        diffs: list[str] = []
+        result = tx.edit_plan_cost(entries, diffs, target_item="10")
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(diffs, [])
+        self.assertEqual(result.message, "Plan Cost 无差异")
+        self.assertNotIn(0, raw.findById("wnd[0]").vkeys)   # 无金额提交
+        self.assertNotIn(14, raw.findById("wnd[0]").vkeys)  # 无删除
+
+    def test_new_rows_appended(self):
+        # SAP 1 行匹配（金额相等不写）；Excel 多出的新键行追加到末尾 row1。
+        preset = {**_item_row("10", "M1", 0), **_existing("1100", "FREMDL", "100.00", 0)}
+        tx, raw = _make_tx(preset, self.MISSING)
+        entries = [
+            PlanCostEntry(cost_center="1100", category="FREMDL", amount=100.0),
+            PlanCostEntry(cost_center="2200", category="T01AST", amount=5.0),
+        ]
+        diffs: list[str] = []
+        result = tx.edit_plan_cost(entries, diffs, target_item="10")
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(raw.findById(_menge(0)).text, "100.00")   # 匹配行金额未重写
+        self.assertEqual(raw.findById(_typps(1)).text, "E")        # 新行追加到 row1
+        self.assertEqual(raw.findById(_herk2(1)).text, "2200")
+        self.assertEqual(raw.findById(_herk3(1)).text, "T01AST")
+        self.assertEqual(raw.findById(_menge(1)).text, "5.00")
+        self.assertEqual(diffs, ["计划成本 成本中心2200(T01AST) 时间 (空)→5.00"])
 
     def test_locates_row_by_item_number_not_position(self):
         # SAP item 1000(行0)/2000(行1)；ODM item 2000 应定位到物理行1，而非位置0。

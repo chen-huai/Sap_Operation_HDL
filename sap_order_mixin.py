@@ -427,7 +427,7 @@ class SapOrderMixin:
         if flow_options.get('va01Check'):
             header_diffs: list[str] = []
             header_result = service.edit_header(order, header_diffs)
-            remarks.append(f"Header:{header_result.message}" if header_result.message else "Header")
+            self._append_remark(remarks, "Header", header_result, header_diffs)
             _report_step('Header 编辑', header_result)
 
         # Item 编辑（va02Check）：收集新增明细(added)，供落库后建立 ODM→SAP 号映射。
@@ -439,7 +439,7 @@ class SapOrderMixin:
             item_result = service.edit_items(order, item_diffs, added_out=added)
             item_ok = item_result.success
             sap_amount_vat = item_result.sap_amount_vat or sap_amount_vat
-            remarks.append(f"Item:{item_result.message}" if item_result.message else "Item")
+            self._append_remark(remarks, "Item", item_result, item_diffs)
             _report_step('Item 编辑', item_result)
 
         # 有 item 新增 → 先重读概览建立 ODM→SAP 号映射，供 Plan Cost 定位（不 save）。
@@ -456,10 +456,7 @@ class SapOrderMixin:
                 pc_diffs: list[str] = []
                 target_item = item_no_map.get(item.item, item.item)
                 plan_result = service.edit_plan_cost(plan_cost_entries, pc_diffs, target_item=target_item)
-                remarks.append(
-                    f"Plan Cost {item.item}:{plan_result.message}"
-                    if plan_result.message else f"Plan Cost {item.item}"
-                )
+                self._append_remark(remarks, f"Plan Cost {item.item}", plan_result, pc_diffs)
                 _report_step('Plan Cost %s' % item.item, plan_result)
 
         # Data B 同步门控：勾选 labCostCheck 即执行（labCostCheck→编辑 Data B），与 Excel 是否
@@ -477,9 +474,7 @@ class SapOrderMixin:
                 data_b_entries, order, clear_diffs, item_no_map=item_no_map,
             )
             data_b_changed = clear_result.changed
-            remarks.append(
-                f"Data B 清空:{clear_result.message}" if clear_result.message else "Data B 清空"
-            )
+            self._append_remark(remarks, "Data B 清空", clear_result, clear_diffs)
             _report_step('Data B 清空', clear_result)
             if not clear_result.success:
                 self._write_edit_log(
@@ -520,7 +515,7 @@ class SapOrderMixin:
             data_b_result = service.write_data_b(
                 data_b_entries, order, db_diffs, item_no_map=item_no_map,
             )
-            remarks.append(f"Data B:{data_b_result.message}" if data_b_result.message else "Data B")
+            self._append_remark(remarks, "Data B", data_b_result, db_diffs)
             _report_step('Data B 重建', data_b_result)
             data_b_incomplete = not data_b_result.success
 
@@ -529,10 +524,7 @@ class SapOrderMixin:
         if order.items:
             ov_diffs: list[str] = []
             order_value_result = service.edit_order_value(order, ov_diffs)
-            remarks.append(
-                f"订单价值:{order_value_result.message}"
-                if order_value_result.message else "订单价值"
-            )
+            self._append_remark(remarks, "订单价值", order_value_result, ov_diffs)
             _report_step('订单价值编辑', order_value_result)
 
         # 最终保存（saveCheck）。
@@ -572,6 +564,19 @@ class SapOrderMixin:
         self.textBrowser.append("Order No.: %s 编辑完成" % order_no)
         self.textBrowser.append('----------------------------------')
         QApplication.processEvents()
+
+    def _append_remark(self, remarks, label, result, diffs):
+        """仅在"有话要说"时把该段结果写入 log Remark，无差异段不占篇幅。
+
+        判定依据用 diffs（本段是否收集到任何差异/提示）而非 SapResult.changed：
+        后者语义是"是否实际改动 SAP"、被 Data B 中途保存决策依赖，不能污染；
+        而这里要的是"是否有内容值得记录"——如"SAP 有、Excel 无，已跳过"没改 SAP 但须留痕。
+        失败或 warning（如 SAP 无对应 item 已跳过）也必须留痕。
+        步骤执行情况仍由 _append_step_result 完整呈现在 UI 步骤面板，信息不丢失。
+        """
+        if not (diffs or not result.success or result.warning):
+            return
+        remarks.append(f"{label}:{result.message}" if result.message else label)
 
     def _write_edit_log(self, log_file, log_data_path, index, order_no, remarks, sap_amount_vat):
         """写编辑结果到 log，操作类型标记 Edit。"""

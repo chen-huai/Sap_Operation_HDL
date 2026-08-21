@@ -6,6 +6,7 @@
 ### 功能特点
 * 数据处理：根据特殊开票信息将原始数据分开，并按要求合并数据。
 * SAP操作：实现SAP自动创建订单的功能。
+* 订单编辑：以 Excel 为准对已有订单做差异化更新（VA02），读 SAP 现值对比后**只改变化的字段**，并输出 `旧→新` 差异日志。
 * 数据恢复：能够找回数据，确保数据完整。
 
 ### 安装指南
@@ -40,10 +41,13 @@
 
 **SAP 服务包 `sap/`**
 * `sap/session.py`：`SapSession` 通过 win32com 连接 SAP GUI。
-* `sap/services/`：`OrderService`、`InvoiceService`、`HourService` —— 业务级 API。
-* `sap/transactions/`：`OrderTransaction`、`InvoiceTransaction`、`HourTransaction` —— 具体 SAP 屏幕操作。
+* `sap/services/`：`OrderService`（创建）、`OrderEditService`（VA02 编辑）、`InvoiceService`、`HourService` —— 业务级 API。
+* `sap/transactions/`：`OrderTransaction`、`OrderEditTransaction`、`InvoiceTransaction`、`HourTransaction` —— 具体 SAP 屏幕操作。
 * `sap/models.py`：`SapConfig`、`OrderData`、`RevenueData`、`SapResult` 等 dataclass。
 * `sap/rules.py`：A2 物料拆分、Data A 判定、Plan Cost 阈值等业务规则。
+
+> 编辑域（`order_edit.py`）只负责「读 SAP 现值 → 与 Excel 对比 → 仅改差异」，
+> 归一化对比口径与写入口径逐字段对齐；详见 [sap/README.md](sap/README.md)。
 
 **数据 / PDF / 营收**
 * `Get_Data.py`：Excel/CSV 数据读取与多 sheet 取数。
@@ -227,6 +231,7 @@ This project aims to provide a solution for automatically operating SAP to creat
 ### Features
 * Processing: Separate original data based on special invoicing information and merge data as required.
 * SAP Operations: Implement the functionality to automatically create orders in SAP.
+* Order Editing: Excel-driven differential update of existing orders (VA02) — reads current SAP values, compares, and **writes only what actually changed**, emitting `old→new` diff logs.
 * Data Recovery: Ability to retrieve data to ensure data integrity.
 
 ### Installation Guide
@@ -259,10 +264,13 @@ This project aims to provide a solution for automatically operating SAP to creat
 
 **SAP service package `sap/`**
 * `sap/session.py`: `SapSession` win32com connection wrapper.
-* `sap/services/`: `OrderService`, `InvoiceService`, `HourService` — business-level APIs.
-* `sap/transactions/`: `OrderTransaction`, `InvoiceTransaction`, `HourTransaction` — concrete SAP screen automation.
+* `sap/services/`: `OrderService` (create), `OrderEditService` (VA02 edit), `InvoiceService`, `HourService` — business-level APIs.
+* `sap/transactions/`: `OrderTransaction`, `OrderEditTransaction`, `InvoiceTransaction`, `HourTransaction` — concrete SAP screen automation.
 * `sap/models.py`: `SapConfig`, `OrderData`, `RevenueData`, `SapResult` and other dataclasses.
 * `sap/rules.py`: A2 material split, Data A customer matching, Plan Cost thresholds.
+
+> The edit domain (`order_edit.py`) does only "read current SAP value → compare with Excel → write the diff",
+> with comparison normalization aligned field-by-field with the write path. See [sap/README.md](sap/README.md).
 
 **Data / PDF / Revenue**
 * `Get_Data.py`: Excel/CSV data reading and multi-sheet access.
