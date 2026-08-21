@@ -137,7 +137,7 @@ class EditItemsMatchTest(unittest.TestCase):
         self.assertEqual(raw.findById(OrderTransaction._material_id(0)).text, "T75-405-00")  # 物料未变
         self.assertEqual(raw.findById(CONDITION_ID).text, "5000.00")  # 编辑条件行 [3,1] 已写入
         # 单行汇总：item/物料/金额旧→新（旧值取自条件页 [3,1]）。
-        self.assertEqual(diffs, ["item 10 物料 T75-405-00 金额 100.00 → 5000.00"])
+        self.assertEqual(diffs, ["item 10 物料 T75-405-00 金额 100.00→5000.00"])
 
     def test_matched_no_diff_outputs_nothing(self):
         # item+物料一致，进详情比对：条件页金额已等于 ODM、无长文本 → 不写，也不输出（只显示有更新的）。
@@ -171,7 +171,7 @@ class EditItemsMatchTest(unittest.TestCase):
         self.assertEqual(raw.findById(LONG_TEXT_ID).text, "新描述")  # 文本已更新
         self.assertEqual(raw.findById(LANG_ID).key, "")  # 语言保持原值
         # 金额无变化不输出，仅文本旧→新。
-        self.assertEqual(diffs, ["item 10 物料 T75-405-00 文本 旧描述 → 新描述"])
+        self.assertEqual(diffs, ["item 10 物料 T75-405-00 文本 旧描述→新描述"])
 
     def test_different_material_adds_new_row(self):
         # item 同号但物料不同 → 新增一条；item 号已存在故 SAP 自动分配（不写 POSNR）。

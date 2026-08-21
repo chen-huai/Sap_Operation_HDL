@@ -167,7 +167,8 @@ class EditOrderValueTest(unittest.TestCase):
         result = tx.edit_order_value(_make_order(rate=7.0), diffs)
         self.assertTrue(result.success, result.message)
         self.assertEqual(raw.findById(AUFTRAGSWERT).text, "70000.00")
-        self.assertEqual(diffs, ["订单价值:→70000.00"])
+        # 空值渲染 (空)；不带 `订单价值:` 前缀（段名由 mixin _append_remark 提供，避免双重前缀）。
+        self.assertEqual(diffs, ["(空)→70000.00"])
 
     def test_below_threshold_clears_dirty_value(self):
         # 净值 1000 × 1 = 1000 < 35000 → 目标为空；历史双重汇率脏值 35,675.00 被清空自愈。
@@ -177,7 +178,8 @@ class EditOrderValueTest(unittest.TestCase):
         result = tx.edit_order_value(_make_order(rate=1.0), diffs)
         self.assertTrue(result.success, result.message)
         self.assertEqual(raw.findById(AUFTRAGSWERT).text, "")  # 脏值已清空
-        self.assertEqual(diffs, ["订单价值:35,675.00→"])
+        # 目标为空 → 渲染 (空)，直观显示"被清空"。
+        self.assertEqual(diffs, ["35,675.00→(空)"])
 
     def test_below_threshold_already_empty_no_diff(self):
         # 净值小额且字段本就为空 → 无差异、不写。
