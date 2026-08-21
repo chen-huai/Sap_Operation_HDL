@@ -11,9 +11,10 @@
 3. 传入业务数据
 4. 显式执行步骤
 
-当前模块主要覆盖三类业务：
+当前模块主要覆盖四类业务：
 
-- 订单业务：创建订单、打开订单、添加 item、填写 Data B 人工成本、填写计划成本、保存、锁定、解锁
+- 订单创建业务：创建订单、打开订单、添加 item、填写 Data B 人工成本、填写计划成本、保存、锁定、解锁
+- 订单编辑业务（VA02 对比更新）：读 SAP 现值与 Excel 对比，**只改差异**——抬头、item、计划成本、Data B、订单价值
 - 发票业务：创建形式发票、查看形式发票
 - 工时业务：登录工时系统、录入工时、保存工时
 
@@ -46,7 +47,8 @@
 2. `Service`
 作用：代表你想做的业务域
 
-- `OrderService`
+- `OrderService`（创建域）
+- `OrderEditService`（编辑域，VA02 对比更新）
 - `InvoiceService`
 - `HourService`
 
@@ -94,9 +96,13 @@
 
 主要文件：
 
-- [order.py](/C:/Data/Python/Sap_Operation_HDL/sap/transactions/order.py)：订单相关事务
+- [order.py](/C:/Data/Python/Sap_Operation_HDL/sap/transactions/order.py)：订单创建相关事务
+- [order_edit.py](/C:/Data/Python/Sap_Operation_HDL/sap/transactions/order_edit.py)：订单编辑事务（VA02 读现值-对比-仅改差异）
 - [invoice.py](/C:/Data/Python/Sap_Operation_HDL/sap/transactions/invoice.py)：发票相关事务
 - [hours.py](/C:/Data/Python/Sap_Operation_HDL/sap/transactions/hours.py)：工时相关事务
+
+`order_edit.py` 通过组合持有一个 `OrderTransaction`，复用其 `open()`/`save()` 与控件 ID helper，
+保证「对比口径」与「创建口径」逐字段一致——否则未变化的数据会因两套逻辑差异被误判为有变化而错误重写。
 
 你可以把这一层理解成“会操作 SAP 的执行层”。
 
@@ -111,7 +117,8 @@
 
 主要文件：
 
-- [order_service.py](/C:/Data/Python/Sap_Operation_HDL/sap/services/order_service.py)
+- [order_service.py](/C:/Data/Python/Sap_Operation_HDL/sap/services/order_service.py)：订单创建域
+- [order_edit_service.py](/C:/Data/Python/Sap_Operation_HDL/sap/services/order_edit_service.py)：订单编辑域（VA02）
 - [invoice_service.py](/C:/Data/Python/Sap_Operation_HDL/sap/services/invoice_service.py)
 - [hour_service.py](/C:/Data/Python/Sap_Operation_HDL/sap/services/hour_service.py)
 
@@ -135,12 +142,17 @@
 ```python
 from sap import (
     CostOptions,
+    DataBEntry,
     HourData,
     HourService,
     InvoiceService,
+    ItemAddInfo,
     OrderData,
+    OrderEditService,
+    OrderItemData,
     OrderService,
     PartnerOptions,
+    PlanCostEntry,
     RevenueData,
     SapConfig,
     SapResult,
@@ -164,6 +176,7 @@ from sap import (
 
 - 从 Excel、数据库或业务系统读取订单数据后，批量创建 SAP 订单
 - 给已存在订单追加 item、补成本、补计划成本
+- 对已存在订单做差异化更新：Excel 为准，只改变化的字段，未变化的一律不碰
 - 为订单创建或查看形式发票
 - 把工时记录批量写入 SAP 工时系统
 
@@ -299,16 +312,77 @@ create_result = service.create_order(
 if create_result.success:
     service.open_order("60001234")
     service.add_items(order, revenue)
-    service.fill_lab_cost(order, revenue)
-    service.apply_plan_cost(
-        order,
-        revenue,
-        cost_options=CostOptions(include_cs=True, include_chm=True, include_phy=True),
-    )
+    # Data B / 计划成本传「已算好的明细」，规则计算在调用方（或 sap/rules.py）完成
+    service.fill_lab_cost_entries(data_b_entries, order)
+    service.apply_plan_cost_entries(plan_cost_entries, focus_row=0)
+    service.fill_order_value(order)          # Σ SAP item 净值 × 汇率，达阈值才写
     service.save("订单")
 
 session.close()
 ```
+
+> 注意：`fill_lab_cost_entries()` / `apply_plan_cost_entries()` 接收的是**已计算好的明细列表**
+> （`list[DataBEntry]` / `list[PlanCostEntry]`），不是 `RevenueData`。
+> 明细由调用方按业务规则先算好，事务层只负责写入——这样规则与页面操作彻底解耦。
+
+### 订单编辑流程（VA02 对比更新）
+
+编辑域与创建域业务分割：编辑只负责「读 SAP 现值 → 与 Excel 对比 → 仅改差异」，绝不无条件重写。
+
+```python
+from sap import OrderEditService, SapSession
+
+session = SapSession.connect()
+service = OrderEditService(session, config)
+
+service.open_order("60001234")
+
+diffs = []                                    # 差异摘要收集器，各段共享同一套格式
+service.edit_header(order, diffs)             # 抬头：售达方/币种/汇率/伙伴/DATA A/ECD/IC
+service.edit_items(order, diffs, added_out=added)   # item：双键匹配，仅改金额/币种/长文本
+
+# item 有新增 → SAP 可能自动改号，须建立 ODM→SAP 号映射供下游定位
+item_no_map = service.build_item_no_mapping(added)
+
+service.edit_plan_cost(entries, diffs, target_item="1000")   # 计划成本：主键匹配、顺序无关
+
+# Data B 必须两段式，中间隔一次 save + open_order（SAP 硬约束，否则必报 ZR520）
+clear = service.clear_data_b(data_b_entries, order, diffs, item_no_map=item_no_map)
+if clear.changed:
+    service.save("Before Data B")
+    service.open_order("60001234")
+    item_no_map = service.build_item_no_mapping(added)
+    service.write_data_b(data_b_entries, order, diffs, item_no_map=item_no_map)
+
+service.edit_order_value(order, diffs)        # 订单价值 = Σ SAP item 净值 × 汇率
+service.save("VA02 Edit")
+
+session.close()
+```
+
+#### 对比口径约定（正确性关键）
+
+SAP 回读格式与 Excel 不同，直接文本比对会让「其实没变」的数据每次都被判为差异并重写。
+故所有对比统一走归一化原语：
+
+| 原语 | 用途 | 解决的坑 |
+|------|------|----------|
+| `_norm` | 文本 | 多行文本回读用 `\r\n`，Excel 是 `\n` |
+| `_norm_amount` | 金额（.2f） | 回读带千分位 `1,000.00` |
+| `_norm_number` | 汇率等数值 | 回读带尾随零 `7.10000` vs `7.1` |
+| `_norm_no` | 成本中心 / item 号 | SAP 定长字段回读带前导零 `0048601258` |
+
+**计划成本按 `(成本中心, 类别)` 主键匹配**，对行序免疫：SAP 与 Excel 顺序不同但内容一致时
+判为无差异，零写入零回车；金额不同才改 MENGE 列；Excel 有 SAP 无则追加到末尾；SAP 有 Excel 无则删除。
+比对天然限定在单个 item 内（编辑器只含该 item 的行），不跨 item。
+
+#### 日志格式约定
+
+各段差异摘要统一格式，便于人工核对：
+
+- 箭头一律 `旧→新`（无空格）：`汇率:7.10000→7.1`、`成本中心48601240(FREMDL) 金额 80.00→100.00`
+- 空值一律渲染 `(空)`：`订单价值:3,021.26→(空)` 一眼看出「被清空」，而非结尾空白
+- **无差异的段不写入 log**，只保留真实变更、警告与失败；步骤执行情况仍由 UI 步骤面板完整呈现
 
 ### 发票流程
 
@@ -368,12 +442,34 @@ session.close()
 
 - `create_order()`
 - `open_order()`
-- `add_items()`
-- `fill_lab_cost()`
-- `apply_plan_cost()`
+- `add_items()` / `update_items()`
+- `fill_lab_cost_entries(entries, order)`
+- `apply_plan_cost_entries(entries, focus_row=0)`
+- `fill_order_value(order)`
 - `save()`
 - `lock()`
 - `unlock()`
+
+### OrderEditService
+
+适用场景（VA02，只改差异）：
+
+- 打开已有订单并对比更新抬头字段
+- 按 item + 物料双键匹配更新 item（金额/币种/长文本），SAP 有 Excel 无的行只提示不删改
+- 按主键匹配更新计划成本（顺序无关）
+- 两段式同步 Data B（删空与重建之间必须隔一次保存）
+- 重算回填订单价值
+
+常用方法：
+
+- `open_order()`
+- `edit_header()`
+- `edit_items()`
+- `build_item_no_mapping()`：新增 item 被 SAP 自动改号后建立 ODM→SAP 号映射
+- `edit_plan_cost()`
+- `clear_data_b()` / `write_data_b()`：**必须成对使用且中间隔一次 `save()` + `open_order()`**
+- `edit_order_value()`
+- `save()`
 
 ### InvoiceService
 
@@ -413,6 +509,12 @@ session.close()
 - `order_no`：订单号
 - `proforma_no`：形式发票号
 - `sap_amount_vat`：SAP 页面返回的金额文本
+- `warning`：未失败但需提示用户（如「SAP 无对应 item，已跳过」），UI 用区别色显示
+- `changed`：本步骤是否**实际改动了** SAP；`False` 表示对比后无差异、原样跳过。
+  编辑流程据此决定后续动作（如 `clear_data_b()` 返回 `changed=False` 则免掉中途保存）
+
+注意：`changed` 表达的是「是否动了 SAP」，不要用它判断「是否有内容值得写日志」——
+例如「SAP 有、Excel 无，已跳过」没改 SAP 但必须留痕，后者应看该段的差异摘要是否为空。
 
 推荐用法：
 
@@ -433,4 +535,4 @@ if not result.success:
 
 如果你是调用方，可以把这个模块理解成：
 
-“一个把 SAP GUI 自动化封装成订单、发票、工时三类服务接口的业务模块。”
+“一个把 SAP GUI 自动化封装成订单创建、订单编辑、发票、工时四类服务接口的业务模块。”
