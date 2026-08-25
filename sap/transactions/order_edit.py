@@ -36,8 +36,34 @@ from sap.transactions.order import OrderTransaction
 class OrderEditTransaction:
     """封装 VA02 订单字段对比更新操作。"""
 
-    # 售达方/付款方联动重算弹窗排空的最大轮数（死循环兜底，见 _confirm_sold_to_dialogs）。
-    _MAX_DIALOG_ROUNDS = 8
+    # 弹窗排空的最大轮数，纯死循环兜底——真正的退出条件是"wnd[1] 已不存在"。
+    # 故上限要给足：改售达方时 SAP 对每个 item 各弹一次重定价/税码确认，再加付款方联动、
+    # 汇率、重定价，4 个 item 的订单就能超过 10 个弹窗。原值 8 实测排不完（2026-08-25 log：
+    # 弹窗残留 → press(btnBT_HEAD) 被模态窗挡住不生效 → select_tab(tabpT\01) 报找不到元素
+    # → edit_header 整段抛异常 → _edit_partners 从未执行 → buyer/CS/Sales 没更新）。
+    # 无弹窗时第一轮就返回，调大零成本。
+    _MAX_DIALOG_ROUNDS = 50
+
+    # 进入抬头详情屏的重试轮数（每轮：排空弹窗 → press → 探测页签）。
+    _MAX_HEADER_ENTRY_RETRIES = 3
+
+    # 伙伴角色 PARVW key。ZG/VE 由创建路径 order.py:_fill_partners 实测确认。
+    #
+    # _PARVW_EMPLOYEE（负责雇员/CS 行）**至今未知**：`ER` 是 SAP SD 标准值推断，已被实机
+    # 否决（2026-08-25 log: `Primary CS:角色key ER 无效(待校正)`，set_key 被 combo 拒绝）。
+    # 所以 CS 段不再依赖它——按显示文本命中负责雇员行后只写值、不动 key（同创建口径）。
+    # 本常量仅用于"负责雇员行整行不存在"这一兜底分支，目前注定记「待校正」而不写脏数据；
+    # 真实 key 采集到后改这一处即可生效。
+    _PARVW_GPC = "ZG"
+    _PARVW_SALES = "VE"
+    _PARVW_EMPLOYEE = "ER"
+
+    # 负责雇员行（CS 所在行）的界面显示文本，中/英双语环境各一。
+    _EMPLOYEE_TEXTS = frozenset({"负责雇员", "Employee respons."})
+
+    # Sales(VE) 的创建口径行位（order.py:_fill_partners 写死行 7）。行 4/5 归负责雇员与
+    # Buyer(GPC)、行 6 归联系人(AP)，故 VE 从无到有时落行 7 才与创建一致。
+    _SALES_ROW = 7
 
     def __init__(self, session: SapSession, config: SapConfig):
         """基于共享会话初始化；持有 OrderTransaction 复用 open/save/控件 ID。"""
@@ -141,6 +167,25 @@ class OrderEditTransaction:
         diffs.append(f"{label}{old_disp}→{new_disp}")
         return True
 
+    def _compare_and_set_tolerant(
+        self, element_id: str, new_value, *, field: str, diffs: list[str], **kwargs
+    ) -> bool:
+        """_compare_and_set 的只读容错版：写入被 SAP 拒绝时记原因、不抛异常。
+
+        SAP 按订单状态/客户属性把部分抬头字段设为只读，写入抛
+        `Property '.text' can not be set.`（非 SapUiError，控件查得到、只是不可写），
+        故捕 Exception。用于"目标值算得出、但 SAP 可能不允许改"的字段（Data B 抬头两项）：
+        这类拒绝属业务约束而非程序缺陷，记 `字段:只读无法修改` 留痕即可，不该让整段失败、
+        也不该让同段后续字段被跳过。
+
+        普通字段不要用这个——控件 ID 写错、屏态不对这类真缺陷需要冒泡出来才能被发现。
+        """
+        try:
+            return self._compare_and_set(element_id, new_value, field=field, diffs=diffs, **kwargs)
+        except Exception as exc:
+            diffs.append(f"{field}:只读无法修改(SAP限制: {exc})")
+            return False
+
     # ------------------------------------------------------------------ #
     # 抬头编辑
     # ------------------------------------------------------------------ #
@@ -151,27 +196,84 @@ class OrderEditTransaction:
         DATA A 客户组(T\\13) / ECD 与 IC 交易类型(T\\14)。
         Payer 由售达方(sap_no)联动，不单独写；Tax-inclusive amount 仅做校验不落 SAP 字段。
         售达方(sap_no)本身在 VA02 是否可改、控件 ID 待录制校正，见 _edit_sold_to。
+
+        字段顺序有依赖：_edit_sold_to 必须最先（控件只在概览屏），且改售达方会让 SAP 按新
+        客户主数据重建伙伴表、清除 ZG/ER/VE 手工角色行，故 _edit_partners 必须排在其后，
+        并对三个角色一律按创建同源行位同步（见 _edit_partners）。
+
+        **详情屏各段独立容错**：每段单独 try、段前排空上一段留下的弹窗，一段异常只记
+        `段名:原因` 并继续下一段。原实现用一个大 try 包住全部段，任何一段抛异常后面全部
+        不执行——2026-08-25 实测就是币种段 select_tab 报错，把伙伴/文本/Data A/Data B 抬头
+        五段一起吞掉，导致 buyer/CS/Sales 从未更新。SAP 的联动确认弹窗是正常现象，不该
+        让它连累无关字段。
         """
         result = SapResult(step="edit_header")
+        failures: list[str] = []
+
         try:
             # 售达方(SAP Customer Code)位于 VA02 概览屏 subSUBSCREEN_HEADER:4021，
             # 必须在按 btnBT_HEAD 进入抬头详情之前对比/编辑（口径同创建 order.py:71）；
             # 否则进入详情后该控件不在当前屏，读取失败会被静默跳过。
             self._edit_sold_to(order, diffs)
-
-            # 进入抬头详情视图（与创建一致），处理币种/文本/伙伴/submission。
-            self.session.press("wnd[0]/usr/subSUBSCREEN_HEADER:SAPMV45A:4021/btnBT_HEAD")
-
-            self._edit_currency(order, diffs)
-            self._edit_partners(order, diffs)
-            self._edit_short_text(order, diffs)
-            self._edit_submission(order, diffs)
-            self._edit_data_a(order, diffs)
-            self._edit_data_b_header(order, diffs)
         except Exception as exc:
-            return SapResult.fail(f"抬头编辑失败，{exc}", step="edit_header")
-        result.message = "；".join(diffs) if diffs else "抬头无差异"
+            failures.append(f"售达方:{exc}")
+
+        # 详情屏进不去 → 后续所有段都无控件可操作，此时才整段判失败。
+        if not self._enter_header_detail(diffs):
+            message = "抬头详情屏进入失败(弹窗未排空或屏态异常)"
+            if failures:
+                message += "；" + "；".join(failures)
+            return SapResult.fail(message, step="edit_header")
+
+        for name, handler in (
+            ("币种", self._edit_currency),
+            ("伙伴", self._edit_partners),
+            ("售达方文本", self._edit_short_text),
+            ("Submission", self._edit_submission),
+            ("Data A", self._edit_data_a),
+            ("Data B抬头", self._edit_data_b_header),
+        ):
+            # 段前排空：上一段改字段可能触发联动弹窗，残留模态窗会让本段 select_tab 失败。
+            self._dismiss_popups()
+            try:
+                handler(order, diffs)
+            except Exception as exc:
+                failures.append(f"{name}:{exc}")
+
+        if failures:
+            # 部分段失败：已成功的段不回滚、结果不判 fail（否则调用方以为整个抬头没动），
+            # 但标 warning 让 UI 用区别色，并把失败段写进 message 供 log 追溯。
+            # 无 diffs 时不说"抬头无差异"——那与"有失败段"自相矛盾，读 log 会误判。
+            result.warning = True
+            done = "；".join(diffs) if diffs else "未产生差异"
+            result.message = f"{done}；失败段: " + "；".join(failures)
+        else:
+            result.message = "；".join(diffs) if diffs else "抬头无差异"
         return result
+
+    def _enter_header_detail(self, diffs: list[str]) -> bool:
+        """进入抬头详情屏（btnBT_HEAD），带弹窗排空与重试；成功返回 True。
+
+        改售达方后 SAP 会连弹多个确认框，模态窗未排空时 press(btnBT_HEAD) **不报错也不
+        生效**，屏幕仍停在概览屏——后续 select_tab(tabpT\\01) 才报"找不到元素"，错误信息
+        指向的位置与真实原因相差一步，实机排查时极易误判（2026-08-25 log 即此）。
+        故每轮先排空弹窗、再 press、最后**探测页签是否真的存在**来确认进屏成功。
+        """
+        for _ in range(self._MAX_HEADER_ENTRY_RETRIES):
+            self._dismiss_popups()
+            self._try_press("wnd[0]/usr/subSUBSCREEN_HEADER:SAPMV45A:4021/btnBT_HEAD")
+            if self._header_detail_ready():
+                return True
+        diffs.append("抬头详情屏:进入失败(弹窗未排空或屏态异常)")
+        return False
+
+    def _header_detail_ready(self) -> bool:
+        """探测是否已在抬头详情屏：T\\01 页签存在即视为就绪。"""
+        try:
+            self.session.find("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\01")
+        except SapUiError:
+            return False
+        return True
 
     def _edit_sold_to(self, order: OrderData, diffs: list[str]) -> None:
         """对比并编辑售达方(SAP Customer Code)；Payer 一一对应随之联动。
@@ -198,10 +300,13 @@ class OrderEditTransaction:
         self.session.set_text(sold_to_id, new_value)
         self.session.focus(sold_to_id, len(new_value))
         self.session.send_vkey(0)
-        self._confirm_sold_to_dialogs()
+        cleared = self._confirm_sold_to_dialogs()
         diffs.append(f"售达方(SAP No):{self._norm(current) or '(空)'}→{new_value or '(空)'}")
+        if not cleared:
+            # 排空不掉的弹窗会挡住后续所有 wnd[0] 操作，必须显式留痕而非静默放过。
+            diffs.append("售达方:联动弹窗未排空(待排查)")
 
-    def _confirm_sold_to_dialogs(self) -> None:
+    def _confirm_sold_to_dialogs(self) -> bool:
         """动态排空改售达方后 SAP 弹出的联动重算弹窗。
 
         弹窗数量不是 item 行数的函数，而是随本次变更连带触发的重算种类而变：
@@ -215,31 +320,52 @@ class OrderEditTransaction:
 
         缺窗时 _try_press/try_send_vkey 幂等返回 False，天然给出退出信号；
         再以 _MAX_DIALOG_ROUNDS 兜底，杜绝异常弹窗导致死循环。
+
+        Returns:
+            bool: 是否已排空。跑满上限仍有弹窗时返回 False——原实现此处静默 return，
+                log 里查不到任何痕迹，后续步骤在被遮挡的屏上操作报的又是别的错。
         """
         for _ in range(self._MAX_DIALOG_ROUNDS):
             if self._try_press("wnd[1]/usr/btnSPOP-VAROPTION1"):
                 continue
-            if self.session.try_send_vkey(0, window_id="wnd[1]"):
+            if self._try_send_popup_vkey():
                 continue
-            return
+            return True
+        return False
+
+    def _try_send_popup_vkey(self) -> bool:
+        """向 wnd[1] 发回车，容错返回是否发出（弹窗排空循环专用）。
+
+        不直接用 session.try_send_vkey：后者只捕 SapUiError，而 `.sendVKey()` 本身
+        抛的 COM 异常会穿透（同 _try_press 的说明）。排空循环绝不该因单次时序异常中断。
+        """
+        try:
+            return self.session.try_send_vkey(0, window_id="wnd[1]")
+        except Exception:
+            return False
 
     def _try_press(self, element_id: str) -> bool:
-        """容错点击按钮：控件不存在时返回 False 而非抛错（条件弹窗按钮专用）。"""
+        """容错点击按钮：控件不存在或点击失败时返回 False 而非抛错（条件弹窗按钮专用）。
+
+        捕获范围是 Exception 而非仅 SapUiError：session.find() 会把查找异常包装成
+        SapUiError，但随后的 `.press()` 不在其 try 内——按钮被禁用、模态窗状态跳变时
+        COM 抛的是原始异常，只捕 SapUiError 会让它穿透整个弹窗排空循环。
+        """
         try:
             self.session.press(element_id)
             return True
-        except SapUiError:
+        except Exception:
             return False
 
-    def _dismiss_popups(self, max_rounds: int = 3) -> None:
+    def _dismiss_popups(self, max_rounds: int = 10) -> None:
         """连续回车关闭残留的 wnd[1] 确认弹窗，直到无弹窗或达上限。
 
         SAP 改字段后可能弹出链式确认框（如重新定价提示），残留的模态弹窗会让
-        后续 wnd[0] 操作（select_tab 等）抛错并被 edit_header 的 try 吞掉，导致
-        "后面方法全不触发"。这里兜底逐个关闭。
+        后续 wnd[0] 操作（select_tab 等）抛错。默认 10 轮：币种/汇率联动在多 item
+        订单上也能弹出多个，原值 3 偏小；无弹窗时第一轮即返回，调大零成本。
         """
         for _ in range(max_rounds):
-            if not self.session.try_send_vkey(0, window_id="wnd[1]"):
+            if not self._try_send_popup_vkey():
                 return
 
     def _edit_currency(self, order: OrderData, diffs: list[str]) -> None:
@@ -295,10 +421,23 @@ class OrderEditTransaction:
                 pass
 
     def _edit_partners(self, order: OrderData, diffs: list[str]) -> None:
-        """对比伙伴页 GPC Code / CS / Sales（T\\09）。
+        """把伙伴页三角色（T\\09）幂等同步到期望值：Buyer(GPC) / Primary CS / Sales。
 
-        伙伴表行号随订单不同而变，先按 PARVW 角色 key 定位行，再对比 partner 值。
-        角色：ZG=GPC、负责雇员行=CS(cs_code)、VE=Sales(sales_code)。
+        角色与数据源：
+            Buyer(GPC) = Excel `Buyer(GPC)` → order.global_partner_code → ZG 行
+            Primary CS = config.cs_code → 负责雇员行
+            Sales(选填) = config.sales_code → VE 行
+
+        **行位沿用创建同源口径**（见 _resolve_partner_rows / _resolve_sales_row），不按
+        角色 key 搜索后落到空行：SAP 自动带出的行 4/5 一为负责雇员、另一为送达方，创建流程
+        把送达方那行改成 ZG 写 Buyer 值（"送达方就是 buyer"的由来），VE 固定行 7。补到别的
+        行 SAP 不认——这是第一轮"找不到就新增到空行"修法失败的原因。
+
+        覆盖用户 2026-08-25 提的两种情况，合并为一条幂等规则：
+            ① 付款方变动（Excel SAP No. 改动 → _edit_sold_to 写入 → SAP 重跑 partner
+               determination）→ 三行被清空 → 按期望值补回；
+            ② 付款方未变、三者之一自身变了 → 按期望值改。
+        即无条件保证三字段最终等于期望值，同时保留"仅差异才写"：三者都没变时零写入零弹窗。
         """
         self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\09")
         partner_prefix = (
@@ -307,42 +446,180 @@ class OrderEditTransaction:
             "SAPLV09C:1000/tblSAPLV09CGV_TC_PARTNER_OVERVIEW"
         )
 
-        # GPC：定位 ZG 行后对比 partner 编码；改动后提交并确认 SAP 校验弹窗。
-        gpc_row = self._find_partner_row(partner_prefix, "ZG")
-        if gpc_row is not None and order.global_partner_code:
-            self._compare_partner_and_confirm(
-                f"{partner_prefix}/ctxtGVS_TC_DATA-REC-PARTNER[1,{gpc_row}]",
-                order.global_partner_code,
-                field="GPC Code",
-                diffs=diffs,
+        # 行位一次定完：行 4/5 的归属由 SAP 带出的角色决定，本方法内不会变化。
+        employee_row, gpc_row = self._resolve_partner_rows(partner_prefix)
+
+        # 三段均为"期望值为空则整段跳过"——没有期望值时既不改也不补。
+
+        # Buyer(GPC)：固定落 gpc_row，角色强制为 ZG（SAP 重置后该行常被恢复成送达方）。
+        if order.global_partner_code:
+            self._sync_partner_row(
+                partner_prefix, gpc_row, self._PARVW_GPC, order.global_partner_code,
+                field="GPC Code", diffs=diffs,
             )
 
-        # CS：配置映射出的 cs_code 写在"负责雇员/Employee respons."行；改动后提交并确认。
+        # Primary CS：优先按显示文本全表扫描定位负责雇员行——命中即证明该行角色正确，
+        # 只写值、绝不动 key（口径同创建 order.py:165）。改 key 是纯风险动作，实机已证明
+        # 该 combo 不接受 `ER`（log: `Primary CS:角色key ER 无效(待校正)`），而它本不需改。
         if self.config.cs_code:
             cs_row = self._find_employee_row(partner_prefix)
             if cs_row is not None:
-                self._compare_partner_and_confirm(
-                    f"{partner_prefix}/ctxtGVS_TC_DATA-REC-PARTNER[1,{cs_row}]",
-                    self.config.cs_code,
-                    field="Primary CS",
-                    diffs=diffs,
-                )
-
-        # Sales：VE 行对比 sales_code；改动后提交并确认。
-        # 销售从无到有时订单原本无 VE 行（创建侧 add_sales_partner 未触发），此时新增一行。
-        if self.config.sales_code:
-            ve_row = self._find_partner_row(partner_prefix, "VE")
-            if ve_row is not None:
-                self._compare_partner_and_confirm(
-                    f"{partner_prefix}/ctxtGVS_TC_DATA-REC-PARTNER[1,{ve_row}]",
-                    self.config.sales_code,
-                    field="Sales",
-                    diffs=diffs,
+                self._sync_partner_row(
+                    partner_prefix, cs_row, None, self.config.cs_code,
+                    field="Primary CS", diffs=diffs,
                 )
             else:
-                self._add_partner_row(
-                    partner_prefix, "VE", self.config.sales_code, field="Sales", diffs=diffs
+                # 负责雇员行整行不存在：只能凭推断的 _PARVW_EMPLOYEE 新建，自证机制保证
+                # 不写脏数据。ER 已被实机否决，故这条分支目前注定记「待校正」——留着是为了
+                # 留痕（否则该场景静默无声），真实 key 采集到后改常量即可生效。
+                self._sync_partner_row(
+                    partner_prefix, employee_row, self._PARVW_EMPLOYEE, self.config.cs_code,
+                    field="Primary CS", diffs=diffs, expect_texts=self._EMPLOYEE_TEXTS,
                 )
+
+        # Sales（选填）：已有 VE 行用之，否则落创建口径的行 7（见 _resolve_sales_row）。
+        if self.config.sales_code:
+            self._sync_partner_row(
+                partner_prefix, self._resolve_sales_row(partner_prefix),
+                self._PARVW_SALES, self.config.sales_code,
+                field="Sales", diffs=diffs,
+            )
+
+    @staticmethod
+    def _parvw_id(partner_prefix: str, row: int) -> str:
+        """伙伴表指定行的角色(PARVW)下拉框 ID。"""
+        return f"{partner_prefix}/cmbGVS_TC_DATA-REC-PARVW[0,{row}]"
+
+    @staticmethod
+    def _partner_field_id(partner_prefix: str, row: int) -> str:
+        """伙伴表指定行的伙伴编码(PARTNER)输入框 ID。"""
+        return f"{partner_prefix}/ctxtGVS_TC_DATA-REC-PARTNER[1,{row}]"
+
+    def _sync_partner_row(
+        self,
+        partner_prefix: str,
+        row: int | None,
+        parvw_key: str | None,
+        value,
+        *,
+        field: str,
+        diffs: list[str],
+        expect_texts: frozenset[str] | None = None,
+    ) -> None:
+        """把指定**行位**的伙伴角色同步到期望值：角色 key 不符先纠正，再对比写编码。
+
+        行位由调用方按创建同源口径给定（见 _resolve_partner_rows），本方法不做定位。
+        对 SAP 清空伙伴后的四种状态一律收敛到期望值：
+
+            行在、值空       → key 已对，只写值（付款方变动场景）
+            行在、值不对     → 只写值（三字段自身变动场景）
+            行角色被重置     → set_key 改回 parvw_key，再写值
+            行全空(key 也空) → set_key 补角色，再写值
+
+        Args:
+            row: 目标行号；None 表示定位失败（如无空行可用），记待校正后跳过。
+            parvw_key: 目标角色 key；传 **None** 表示该行角色已确认正确（如按显示文本命中
+                的负责雇员行），跳过角色纠正只写值——口径同创建 order.py:165 写 CS。
+                改 key 是纯风险动作：实机已证明负责雇员行不接受 `ER`，而它本来就不需要改。
+            expect_texts: 传入时启用角色自证——改完 key 后回读该行 combo 显示文本，
+                不在集合内即认定 key 用错，跳过写值并记「待校正」。供 key 未经实测的
+                角色使用（CS/_PARVW_EMPLOYEE），已实测的 ZG/VE 不必传。
+
+        写脏数据的两道闸（key 错时宁可不写，也不能把编码挂到错误角色上）：
+            ① set_key 抛错（key 不在 combo 选项里）→ 记待校正、不写编码；
+            ② 显示文本与 expect_texts 不符 → 记待校正、不写编码。
+        两种情况都不动 partner 列，SAP 侧保持原样。
+        """
+        if not self._norm(value):
+            return
+        if row is None:
+            diffs.append(f"{field}:无可用行位(待校正)")
+            return
+
+        if parvw_key is not None:
+            parvw_id = self._parvw_id(partner_prefix, row)
+            if not self._ensure_parvw_key(
+                parvw_id, parvw_key, field=field, diffs=diffs, expect_texts=expect_texts
+            ):
+                return
+
+        self._compare_partner_and_confirm(
+            self._partner_field_id(partner_prefix, row), value, field=field, diffs=diffs
+        )
+
+    def _ensure_parvw_key(
+        self,
+        parvw_id: str,
+        parvw_key: str,
+        *,
+        field: str,
+        diffs: list[str],
+        expect_texts: frozenset[str] | None = None,
+    ) -> bool:
+        """确保该行角色为 parvw_key；已对则不动，不对则改写。返回是否可安全写编码。
+
+        角色已正确时直接返回 True 且不记 diffs——绝大多数订单走这条零开销路径。
+        改写角色本身也记入 diffs（`字段:角色 X→Y`），便于从 log 看出 SAP 重置过伙伴表。
+        """
+        try:
+            current = (self.session.find(parvw_id).key or "").strip()
+        except SapUiError:
+            diffs.append(f"{field}:角色控件读取失败(待校正)")
+            return False
+
+        if current != parvw_key:
+            # 闸①：set_key 底层是 COM 赋值，非法 key 抛的不一定是 SapUiError，
+            # 用 Exception 兜底（口径同 _edit_short_text 的语言设置）。
+            try:
+                self.session.set_key(parvw_id, parvw_key)
+            except Exception:
+                diffs.append(f"{field}:角色key {parvw_key} 无效(待校正)")
+                return False
+            diffs.append(f"{field}:角色 {current or '(空)'}→{parvw_key}")
+
+        # 闸②：key 合法但对应角色不对。回读失败按"无法自证"处理，同样不写编码。
+        if expect_texts is not None:
+            try:
+                actual = (self.session.read_text(parvw_id) or "").strip()
+            except SapUiError:
+                actual = ""
+            if actual not in expect_texts:
+                diffs.append(
+                    f"{field}:角色key {parvw_key} 对应「{actual or '(空)'}」非预期(待校正)"
+                )
+                return False
+        return True
+
+    def _resolve_partner_rows(self, partner_prefix: str) -> tuple[int, int]:
+        """按创建同源口径定出 (负责雇员行, Buyer/GPC 行)，即 order.py:157-159 的判定。
+
+        SAP 按客户主数据自动带出的行 4/5 一为负责雇员、另一为其他角色（实测常为送达方）；
+        创建流程把后者的角色强改为 ZG 并写入 Buyer(GPC) 值——这就是"送达方就是 buyer"的由来。
+        编辑必须沿用同一行位，否则补到别的行 SAP 不认（第一轮"补到空行"失败的原因）。
+
+        行 4 读不到（屏态异常）时退回创建路径的默认分支 (5, 4)，与创建行为一致。
+        """
+        try:
+            four_name = (self.session.read_text(self._parvw_id(partner_prefix, 4)) or "").strip()
+        except SapUiError:
+            four_name = ""
+        return (4, 5) if four_name in self._EMPLOYEE_TEXTS else (5, 4)
+
+    def _resolve_sales_row(self, partner_prefix: str) -> int | None:
+        """定出 Sales(VE) 的目标行：已有 VE 行则用它，否则用创建口径的行 7。
+
+        行 7 被别的角色占用时退回首个空行——绝不覆盖已有角色（覆盖会丢掉那个伙伴）。
+        无空行可用时返回 None，由调用方记待校正。
+        """
+        ve_row = self._find_partner_row(partner_prefix, self._PARVW_SALES)
+        if ve_row is not None:
+            return ve_row
+
+        try:
+            occupant = (self.session.find(self._parvw_id(partner_prefix, self._SALES_ROW)).key or "").strip()
+        except SapUiError:
+            occupant = "?"  # 读不到即按占用处理，不冒险覆盖
+        return self._SALES_ROW if not occupant else self._find_empty_partner_row(partner_prefix)
 
     def _compare_partner_and_confirm(
         self, element_id: str, new_value, *, field: str, diffs: list[str]
@@ -362,7 +639,7 @@ class OrderEditTransaction:
         """扫描伙伴表前 max_rows 行，返回 PARVW 角色 key 命中的首行行号；找不到返回 None。"""
         for row in range(max_rows):
             try:
-                key = self.session.find(f"{partner_prefix}/cmbGVS_TC_DATA-REC-PARVW[0,{row}]").key
+                key = self.session.find(self._parvw_id(partner_prefix, row)).key
             except SapUiError:
                 break
             if (key or "").strip() == parvw_key:
@@ -370,13 +647,22 @@ class OrderEditTransaction:
         return None
 
     def _find_employee_row(self, partner_prefix: str, max_rows: int = 12) -> int | None:
-        """定位"负责雇员/Employee respons."行（CS 所在行）；找不到返回 None。"""
+        """按显示文本全表扫描定位负责雇员行（CS 所在行）；找不到返回 None。
+
+        比 _resolve_partner_rows 的"只看行 4/5"更稳：SAP 重跑 partner determination 后
+        负责雇员行可能换到别的行号，那时 _resolve_partner_rows 会盲目退回 (5,4)，把 CS
+        写到一个根本不是负责雇员的行上。
+
+        按显示文本而非 PARVW key 匹配——该角色的 key 至今未知：`ER` 推断已被实机否决
+        （2026-08-25 log: `Primary CS:角色key ER 无效(待校正)`）。命中即证明角色正确，
+        调用方只写值、不动 key，故无需知道 key 是什么。
+        """
         for row in range(max_rows):
             try:
-                text = self.session.read_text(f"{partner_prefix}/cmbGVS_TC_DATA-REC-PARVW[0,{row}]")
+                text = self.session.read_text(self._parvw_id(partner_prefix, row))
             except SapUiError:
                 break
-            if (text or "").strip() in {"负责雇员", "Employee respons."}:
+            if (text or "").strip() in self._EMPLOYEE_TEXTS:
                 return row
         return None
 
@@ -387,34 +673,13 @@ class OrderEditTransaction:
         """
         for row in range(max_rows):
             try:
-                key = (self.session.find(f"{partner_prefix}/cmbGVS_TC_DATA-REC-PARVW[0,{row}]").key or "").strip()
-                partner = (self.session.read_text(f"{partner_prefix}/ctxtGVS_TC_DATA-REC-PARTNER[1,{row}]") or "").strip()
+                key = (self.session.find(self._parvw_id(partner_prefix, row)).key or "").strip()
+                partner = (self.session.read_text(self._partner_field_id(partner_prefix, row)) or "").strip()
             except SapUiError:
                 break
             if not key and not partner:
                 return row
         return None
-
-    def _add_partner_row(
-        self, partner_prefix: str, parvw_key: str, partner_value, *, field: str, diffs: list[str]
-    ) -> None:
-        """在伙伴表空行上新增一行：设角色 key + 写编码并提交确认（口径同创建 order.py:189-193）。
-
-        无空行可用时记录待校正、绝不盲写。新增动作记入 diffs（`字段:(空)→新值`）。
-        """
-        value = self._norm(partner_value)
-        if not value:
-            return
-        row = self._find_empty_partner_row(partner_prefix)
-        if row is None:
-            diffs.append(f"{field}:无空行可新增(待校正)")
-            return
-        self.session.set_key(f"{partner_prefix}/cmbGVS_TC_DATA-REC-PARVW[0,{row}]", parvw_key)
-        self.session.set_text(f"{partner_prefix}/ctxtGVS_TC_DATA-REC-PARTNER[1,{row}]", value)
-        self.session.focus(f"{partner_prefix}/ctxtGVS_TC_DATA-REC-PARTNER[1,{row}]", len(value))
-        self.session.send_vkey(0)
-        self._dismiss_popups()
-        diffs.append(f"{field}:(空)→{value}")
 
     def _edit_submission(self, order: OrderData, diffs: list[str]) -> None:
         """对比 Product Sub-Category 驱动的 submission 标识（仅 404 场景，T\\11）。"""
@@ -449,16 +714,20 @@ class OrderEditTransaction:
         - ECD(VORAUS_AUFENDE)：仅 Excel 有值才同步。Excel 缺 ECD 属数据不全，不视为"要清空"。
         - IC 交易类型(IC_TRANSAKTION)：命中 Data_B_TUV → O1，未命中 → 清空。config 为权威，
           客户从清单移除后 SAP 上的 O1 须随之撤销，故走全量对比覆盖而非"命中才写"。
+
+        两项均走**字段级容错**：SAP 会按订单状态/客户属性把这些字段设为只读，写入时抛
+        `Property '.text' can not be set.`（2026-08-25 实测）。这类拒绝是 SAP 的业务约束，
+        不该让本段整体失败、更不该让第一个字段的只读连累第二个字段的同步。
         """
         base = "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/ssubSUBSCREEN_BODY:SAPMV45A:4312"
         self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14")
 
         if order.ecd:
-            self._compare_and_set(
+            self._compare_and_set_tolerant(
                 f"{base}/ctxtZAUFTD-VORAUS_AUFENDE", order.ecd, field="ECD", diffs=diffs,
             )
 
-        self._compare_and_set(
+        self._compare_and_set_tolerant(
             f"{base}/ctxtZAUFTD-IC_TRANSAKTION",
             "O1" if should_fill_ic_transaction(order, self.config) else "",
             field="IC交易类型",
