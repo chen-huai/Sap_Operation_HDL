@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import unittest
 
@@ -30,32 +31,77 @@ def _menge(row): return f"{TABLE}/txtRK70L-MENGE[6,{row}]"
 
 
 class _Element:
-    def __init__(self, text: str = ""):
+    def __init__(self, text: str = "", owner=None, element_id: str = ""):
         self.text = text
         self.key = ""
         self.caretPosition = 0
         self.focused = False
         self.vkeys: list[int] = []
+        self._owner = owner
+        self._id = element_id
 
-    def setFocus(self): self.focused = True
-    def sendVKey(self, k): self.vkeys.append(k)
+    def setFocus(self):
+        self.focused = True
+        if self._owner is not None:
+            self._owner.focused_id = self._id
+
+    def sendVKey(self, k):
+        self.vkeys.append(k)
+        # Shift+F2(14) = 删除当前焦点所在行：真实 SAP 会移除该行并把后续行整体上移。
+        if k == 14 and self._owner is not None:
+            self._owner.delete_focused_plan_cost_row()
+
     def press(self): pass
     def select(self): pass
 
 
 class _RawSession:
-    """按 id 缓存控件；`missing` 中的 id 触发 findById 抛错（模拟弹窗不存在）。"""
+    """按 id 缓存控件；`missing` 中的 id 触发 findById 抛错（模拟弹窗不存在）。
+
+    额外模拟计划成本编辑器的**删除行为**：Shift+F2 后该行消失、后续行上移。
+    不模拟就会让"重读→删多余行"的循环判定不出进展，与真实 SAP 行为脱节。
+    """
+
+    _PC_COLUMNS = (_typps, _herk2, _herk3, _menge)
 
     def __init__(self, preset=None, missing=None):
         self._cache = preset or {}
         self._missing = missing or set()
+        self.focused_id = ""
 
     def findById(self, element_id: str):
         if element_id in self._missing:
             raise Exception(f"not found: {element_id}")
         if element_id not in self._cache:
-            self._cache[element_id] = _Element()
-        return self._cache[element_id]
+            self._cache[element_id] = _Element(owner=self, element_id=element_id)
+        element = self._cache[element_id]
+        # preset 里的控件构造时不知道 owner/id，首次取用时补齐，保证焦点与删除可追踪。
+        if element._owner is None:
+            element._owner, element._id = self, element_id
+        return element
+
+    def _plan_cost_row_count(self, max_rows: int = 50) -> int:
+        count = 0
+        for row in range(max_rows):
+            if not (self._cache.get(_herk2(row)) and self._cache[_herk2(row)].text):
+                break
+            count += 1
+        return count
+
+    def delete_focused_plan_cost_row(self) -> None:
+        """删除焦点所在的计划成本行：后续行逐列前移，末行清空。"""
+        match = re.search(r"ctxtRK70L-HERK2\[3,(\d+)\]$", self.focused_id or "")
+        if not match:
+            return
+        start = int(match.group(1))
+        total = self._plan_cost_row_count()
+        if start >= total:
+            return
+        for row in range(start, total - 1):
+            for column in self._PC_COLUMNS:
+                self.findById(column(row)).text = self.findById(column(row + 1)).text
+        for column in self._PC_COLUMNS:
+            self.findById(column(total - 1)).text = ""
 
 
 def _make_tx(preset=None, missing=None):
@@ -70,7 +116,7 @@ def _make_tx(preset=None, missing=None):
 
 
 def _item_row(item_no, material, row):
-    """预设 SAP item 概览行（供 _find_item_physical_row 按 item 号定位物理行）。"""
+    """预设 SAP item 概览行（供 OrderTransaction.find_item_row_by_no 按 item 号定位物理行）。"""
     return {
         OrderTransaction._item_id(row): _Element(item_no),
         OrderTransaction._material_id(row): _Element(material),
@@ -123,10 +169,11 @@ class EditPlanCostTest(unittest.TestCase):
         # 旧行 1100 删除：聚焦 HERK2[3,0] + Shift+F2(vkey14)。
         self.assertTrue(raw.findById(_herk2(0)).focused)
         self.assertIn(14, raw.findById("wnd[0]").vkeys)
-        # 新行 2200 追加到末尾 row1（全写四列）。
-        self.assertEqual(raw.findById(_typps(1)).text, "E")
-        self.assertEqual(raw.findById(_herk2(1)).text, "2200")
-        self.assertEqual(raw.findById(_menge(1)).text, "300.00")
+        # 新行 2200 追加到"删除完成后"的末尾——旧行已被删掉，当前末尾即 row0（全写四列）。
+        # 追加位置每次实时重读行数取得，不用删除前的行数递推。
+        self.assertEqual(raw.findById(_typps(0)).text, "E")
+        self.assertEqual(raw.findById(_herk2(0)).text, "2200")
+        self.assertEqual(raw.findById(_menge(0)).text, "300.00")
         self.assertIn("计划成本 成本中心1100(FREMDL) 金额 100.00：Excel 无，已删除", diffs)
         self.assertIn("计划成本 成本中心2200(FREMDL) 金额 (空)→300.00", diffs)
 
