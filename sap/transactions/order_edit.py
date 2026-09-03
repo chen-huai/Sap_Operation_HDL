@@ -74,6 +74,9 @@ class OrderEditTransaction:
         self.session = session
         self.config = config
         self._base = OrderTransaction(session, config)
+        # 描述列首选候选未命中、靠后备候选定位成功时记下实际控件名（见 _find_price_condition_row）。
+        # 只在"首选猜错"时才有值——首选命中无需留痕，金额写成功本身即证据。
+        self._price_column_fallback: str | None = None
 
     # ------------------------------------------------------------------ #
     # 对比原语
@@ -862,6 +865,9 @@ class OrderEditTransaction:
             if truncated:
                 result.warning = True
                 diffs.append("item 行数超过扫描上限，未税加和可能少算，请人工核对")
+            if self._price_column_fallback:
+                # 首选描述列控件名猜错了：留痕实际可用的名字，据此收敛候选表。
+                diffs.append(f"条件表描述列实际为 {self._price_column_fallback}（可收敛候选表）")
         except Exception as exc:
             return SapResult.fail(f"item 编辑失败，{exc}", step="edit_items")
         result.message = "；".join(diffs) if diffs else "item 无差异"
@@ -993,6 +999,57 @@ class OrderEditTransaction:
         "cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[1]/shell"
     )
 
+    # item 详情条件表（T\06）前缀；金额列 [3,row]、币种列 [4,row]、描述列 [2,row]。
+    _CONDITION_BASE = (
+        "wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\06/"
+        "ssubSUBSCREEN_BODY:SAPLV69A:6201/tblSAPLV69ATCTRL_KONDITIONEN/"
+    )
+
+    # 条件表"描述"列（中文界面表头即"描述"）的候选控件名。
+    #
+    # 该列的准确控件名尚未实机确认，故按 SAP 标准命名逐个探测而非赌单一名字：
+    # KOTXT = Konditionstext（条件文本），是最可能的那个。命中的名字会写进 log，
+    # 跑过一单真实订单后即可收敛成常量。列索引固定为 2（2026-09-03 用户实机确认）。
+    _CONDITION_TEXT_CANDIDATES = (
+        "txtRV61A-KOTXT",
+        "txtKOMV-VTEXT",
+        "txtRV61A-VTEXT",
+        "lblRV61A-KOTXT",
+    )
+
+    # 价格条件行的描述文本。中英文界面均显示 "Price"（2026-09-03 用户实机确认），
+    # 故无需像 _EMPLOYEE_TEXTS 那样做双语集合。plan cost 行显示 "Planned Costs"。
+    _PRICE_CONDITION_TEXT = "Price"
+
+    # 条件表探测行数上限：条件行数远小于此，纯防跑飞。
+    _MAX_CONDITION_ROWS = 8
+
+    def _find_price_condition_row(self) -> tuple[int, str] | None:
+        """在 item 详情条件表中定位价格行，返回 (row, 命中的描述列控件名)；找不到返回 None。
+
+        **价格行的行号是变量，不是常量**（2026-09-03 实机确认）：
+            - 创建时录过 plan cost → row0 = Planned Costs、row1 = Price
+            - 创建时没录 plan cost → row0 = Price
+
+        旧实现把 `[3,1]` 当常量，等于赌"每单都有 plan cost"。没有 plan cost 的订单
+        row1 是只读条件行，写入抛 `Property '.text' can not be set.`，整个 item 编辑段
+        失败（实测订单 7482678489）。故改为按**描述列文本**定位——它表达"这一行是什么"，
+        而行号只表达"这一行在哪"，后者会随订单内容变化。
+        """
+        for name in self._CONDITION_TEXT_CANDIDATES:
+            for row in range(self._MAX_CONDITION_ROWS):
+                try:
+                    text = self._norm(self.session.read_text(f"{self._CONDITION_BASE}{name}[2,{row}]"))
+                except SapUiError:
+                    # 该控件名在本屏不存在 → 整个候选作废，换下一个名字（不是换行）。
+                    break
+                if not text:
+                    # 读到空行说明该控件名有效但已扫到表尾，本候选就此结束。
+                    break
+                if text == self._PRICE_CONDITION_TEXT:
+                    return row, name
+        return None
+
     def _enter_item_and_write_condition(
         self,
         row: int,
@@ -1007,8 +1064,12 @@ class OrderEditTransaction:
         新增 item 与已存在 item 的条件表布局不同，分别处理：
             - is_new：完全沿用创建侧新增步骤（物料格进详情、价格条件 [3,5] 直接写，
               币种自动继承单据币种，无需写）；
-            - 已存在：编辑对比（数量格进详情、价格条件 [3,1]，仅差异才写）；单据币种变了，
-              item 条件币种 KOEIN[4,1] 也须随抬头同步（currency=order.currency_type）。
+            - 已存在：编辑对比（数量格进详情、**按描述列实时定位价格行**，仅差异才写）；
+              单据币种变了，同一行的币种列 KOEIN[4,row] 也随抬头同步。
+
+        为何两条路径判据不同：创建时 item 尚未定价，条件表是空白模板、未必存在
+        "Price" 行，`_find_price_condition_row` 的判据不成立；而 [3,5] 在创建路径
+        一直有效、无故障报告，故不动它（见 order.py::_write_item_condition）。
         """
         if is_new:
             # 新增 item：与创建侧新增步骤一致（复用 _base 的条件/长文本写法，价格条件 [3,5]）。
@@ -1019,23 +1080,37 @@ class OrderEditTransaction:
                 self._base._write_item_long_text(item.long_text, result)
             summary = self._new_item_summary(item)
         else:
-            # 已存在 item：按 SAP 录制聚焦数量格(ZMENG[2,row])双击进详情；价格条件在编辑屏第 1 行
-            # KBETR[3,1]（创建侧的 [3,5] 在编辑屏是空行/只读行，写入会抛 Property '.text' can not be set）。
+            # 已存在 item：按 SAP 录制聚焦数量格(ZMENG[2,row])双击进详情。
             self.session.focus(OrderTransaction._quantity_id(row), 16)
             self.session.send_vkey(2)
-            condition_base = (
-                "wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\06/"
-                "ssubSUBSCREEN_BODY:SAPLV69A:6201/tblSAPLV69ATCTRL_KONDITIONEN/"
-            )
-            condition_id = f"{condition_base}txtKOMV-KBETR[3,1]"
             self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\06")
+
+            # 价格行行号随"该单有没有 plan cost"变化，必须实时定位（见 _find_price_condition_row）。
+            located = self._find_price_condition_row()
+            if located is None:
+                # 定位不到就不写：写到猜出来的行上要么被 SAP 拒（只读行），要么改掉
+                # plan cost 那一行的金额——后者更糟，是静默改错数据。
+                result.warning = True
+                self.session.press("wnd[0]/tbar[0]/btn[3]")
+                return "", (
+                    f"item {self._norm(item.item)} 物料 {self._norm(item.material_code)}"
+                    "：未找到 Price 条件行，金额未写入(待人工核对)"
+                )
+            condition_row, text_column = located
+            # 首选候选猜错时留痕一次，供把 _CONDITION_TEXT_CANDIDATES 收敛成常量。
+            # 首选命中则不记——否则每单都多一行 log，破坏"无差异不输出"约定。
+            if text_column != self._CONDITION_TEXT_CANDIDATES[0]:
+                self._price_column_fallback = text_column
+            condition_id = f"{self._CONDITION_BASE}txtKOMV-KBETR[3,{condition_row}]"
             amount_diff = self._diff_set(condition_id, item.revenue, amount=True)
-            # 单据币种变了，同一条件行的币种列 KOEIN[4,1] 也随抬头同步（仅差异才写）。
+            # 币种列 KOEIN[4,row] **必须与价格行同行**（用户 2026-09-03 确认的业务约束）：
+            # 它同样随"该单有没有 plan cost"整行平移，绝不能写死行号，否则没有 plan cost 的
+            # 订单会去改 plan cost 行的币种。故复用上面定位到的 condition_row。
             # 仅在能读到现有币种值时才对比：已定价 item 的 KOEIN 恒有币种，读到空串
             # 说明控件异常/无条件行，此时不盲写（口径同 _edit_sold_to 读不到即跳过）。
             currency_diff = None
             if currency is not None:
-                currency_id = f"{condition_base}ctxtRV61A-KOEIN[4,1]"
+                currency_id = f"{self._CONDITION_BASE}ctxtRV61A-KOEIN[4,{condition_row}]"
                 try:
                     current_currency = self._norm(self.session.read_text(currency_id))
                 except SapUiError:

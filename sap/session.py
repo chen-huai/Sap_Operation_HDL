@@ -6,7 +6,7 @@ import time
 
 import win32com.client
 
-from sap.exceptions import SapConnectionError, SapUiError
+from sap.exceptions import SapConnectionError, SapUiError, SapWriteError
 
 
 class SapSession:
@@ -64,8 +64,17 @@ class SapSession:
         return self.find(element_id).text
 
     def set_text(self, element_id: str, value) -> None:
-        """写入控件文本。"""
-        self.find(element_id).text = value
+        """写入控件文本；被 SAP 拒绝时抛 SapWriteError（消息带控件 ID 与目标值）。
+
+        SAP 对只读字段抛的原始异常只有一句 `Property '.text' can not be set.`，
+        不含任何控件信息——2026-09-02 排查一个 item 金额写不进的订单，为定位到底是
+        哪个控件被拒，连着设了四轮断点。补上 element_id 后，同类问题看日志即可定位。
+        """
+        element = self.find(element_id)
+        try:
+            element.text = value
+        except Exception as exc:
+            raise SapWriteError(f"控件写入被拒: {element_id} = {value!r} ({exc})") from exc
 
     def read_key(self, element_id: str) -> str:
         """读取下拉框 key 值。
@@ -76,8 +85,16 @@ class SapSession:
         return self.find(element_id).key
 
     def set_key(self, element_id: str, value: str) -> None:
-        """写入下拉框 key 值。"""
-        self.find(element_id).key = value
+        """写入下拉框 key 值；被拒时抛 SapWriteError（同 set_text，见其文档）。
+
+        非法 key（不在 combo 选项里）与只读 combo 都走这里，消息带控件 ID 与 key 值，
+        便于区分"key 写错"和"这个 combo 根本不让改"。
+        """
+        element = self.find(element_id)
+        try:
+            element.key = value
+        except Exception as exc:
+            raise SapWriteError(f"下拉框写入被拒: {element_id} = {value!r} ({exc})") from exc
 
     def set_selected(self, element_id: str, value: bool) -> None:
         """写入复选框选中状态。"""
