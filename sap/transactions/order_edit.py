@@ -64,6 +64,7 @@ class OrderEditTransaction:
 
     # 负责雇员行（CS 所在行）的界面显示文本，中/英双语环境各一。
     _EMPLOYEE_TEXTS = frozenset({"负责雇员", "Employee respons."})
+    _GPC_TEXTS = frozenset({"GPC", "Buyer(GPC)", "Buyer (GPC)"})
 
     # Sales(VE) 的创建口径行位（order.py:_fill_partners 写死行 7）。行 4/5 归负责雇员与
     # Buyer(GPC)、行 6 归联系人(AP)，故 VE 从无到有时落行 7 才与创建一致。
@@ -74,10 +75,6 @@ class OrderEditTransaction:
         self.session = session
         self.config = config
         self._base = OrderTransaction(session, config)
-        # 描述列首选候选未命中、靠后备候选定位成功时记下实际控件名（见 _find_price_condition_row）。
-        # 只在"首选猜错"时才有值——首选命中无需留痕，金额写成功本身即证据。
-        self._price_column_fallback: str | None = None
-
     # ------------------------------------------------------------------ #
     # 对比原语
     # ------------------------------------------------------------------ #
@@ -462,7 +459,7 @@ class OrderEditTransaction:
         if order.global_partner_code:
             self._sync_partner_row(
                 partner_prefix, gpc_row, self._PARVW_GPC, order.global_partner_code,
-                field="GPC Code", diffs=diffs,
+                field="GPC Code", diffs=diffs, expect_texts=self._GPC_TEXTS,
             )
 
         # Primary CS：优先按显示文本全表扫描定位负责雇员行——命中即证明该行角色正确，
@@ -580,6 +577,12 @@ class OrderEditTransaction:
             try:
                 self.session.set_key(parvw_id, parvw_key)
             except Exception:
+                try:
+                    actual = (self.session.read_text(parvw_id) or "").strip()
+                except SapUiError:
+                    actual = ""
+                if expect_texts is not None and actual in expect_texts:
+                    return True
                 diffs.append(f"{field}:角色key {parvw_key} 无效(待校正)")
                 return False
             diffs.append(f"{field}:角色 {current or '(空)'}→{parvw_key}")
@@ -865,9 +868,6 @@ class OrderEditTransaction:
             if truncated:
                 result.warning = True
                 diffs.append("item 行数超过扫描上限，未税加和可能少算，请人工核对")
-            if self._price_column_fallback:
-                # 首选描述列控件名猜错了：留痕实际可用的名字，据此收敛候选表。
-                diffs.append(f"条件表描述列实际为 {self._price_column_fallback}（可收敛候选表）")
         except Exception as exc:
             return SapResult.fail(f"item 编辑失败，{exc}", step="edit_items")
         result.message = "；".join(diffs) if diffs else "item 无差异"
@@ -1005,16 +1005,9 @@ class OrderEditTransaction:
         "ssubSUBSCREEN_BODY:SAPLV69A:6201/tblSAPLV69ATCTRL_KONDITIONEN/"
     )
 
-    # 条件表"描述"列（中文界面表头即"描述"）的候选控件名。
-    #
-    # 该列的准确控件名尚未实机确认，故按 SAP 标准命名逐个探测而非赌单一名字：
-    # KOTXT = Konditionstext（条件文本），是最可能的那个。命中的名字会写进 log，
-    # 跑过一单真实订单后即可收敛成常量。列索引固定为 2（2026-09-03 用户实机确认）。
+    # 条件表"描述"列（中文界面表头即"描述"）控件名；2026-09-03 实机确认为 txtRV61A-VTEXT。
     _CONDITION_TEXT_CANDIDATES = (
-        "txtRV61A-KOTXT",
-        "txtKOMV-VTEXT",
         "txtRV61A-VTEXT",
-        "lblRV61A-KOTXT",
     )
 
     # 价格条件行的描述文本。中英文界面均显示 "Price"（2026-09-03 用户实机确认），
@@ -1096,11 +1089,7 @@ class OrderEditTransaction:
                     f"item {self._norm(item.item)} 物料 {self._norm(item.material_code)}"
                     "：未找到 Price 条件行，金额未写入(待人工核对)"
                 )
-            condition_row, text_column = located
-            # 首选候选猜错时留痕一次，供把 _CONDITION_TEXT_CANDIDATES 收敛成常量。
-            # 首选命中则不记——否则每单都多一行 log，破坏"无差异不输出"约定。
-            if text_column != self._CONDITION_TEXT_CANDIDATES[0]:
-                self._price_column_fallback = text_column
+            condition_row, _text_column = located
             condition_id = f"{self._CONDITION_BASE}txtKOMV-KBETR[3,{condition_row}]"
             amount_diff = self._diff_set(condition_id, item.revenue, amount=True)
             # 币种列 KOEIN[4,row] **必须与价格行同行**（用户 2026-09-03 确认的业务约束）：

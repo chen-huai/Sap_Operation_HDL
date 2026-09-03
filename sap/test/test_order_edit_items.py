@@ -350,22 +350,5 @@ class PriceConditionRowTest(unittest.TestCase):
         self.assertEqual(raw.findById(_currency(0)).text, "USD")   # plan cost 行币种未被改
         self.assertEqual(diffs, ["item 10 物料 T75-405-00 币种 USD→CNY"])
 
-    def test_fallback_candidate_recorded(self):
-        # 首选描述列控件名不存在、后备候选可用 → 定位成功，并留痕实际控件名供收敛候选表。
-        fallback = OrderEditTransaction._CONDITION_TEXT_CANDIDATES[1]
-        preset = {**_existing_row("10", "T75-405-00", 0)}
-        preset[f"{CONDITION_BASE}{fallback}[2,0]"] = _Element("Price")
-        preset[_amount(0)] = _Element("100.00")
-        tx, raw = _make_tx(preset, missing={_desc(0)})
-        order = _order(OrderItemData(item="10", material_code="T75-405-00", revenue=680.0))
-        diffs: list[str] = []
-
-        result = tx.edit_items(order, diffs)
-
-        self.assertTrue(result.success, result.message)
-        self.assertEqual(raw.findById(_amount(0)).text, "680.00")
-        self.assertIn(f"条件表描述列实际为 {fallback}（可收敛候选表）", diffs)
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -292,6 +292,20 @@ class SyncPartnerRowTest(unittest.TestCase):
         self.assertEqual(raw.findById(_partner_id(4)).text, "")
         self.assertEqual(diffs, ["Primary CS:角色key ER 无效(待校正)"])
 
+    def test_gpc_display_text_allows_unknown_key(self):
+        # 编辑屏实机存在：GPC 行显示文本正确，但 ZG key 被 combo 拒绝。此时不改 key，直接写 Buyer 值。
+        preset = {_parvw_id(5): _ComboElement({"ZP": "GPC"}, frozenset({"ZG"}), key="ZP")}
+        tx, raw = _make_transaction(preset, invalid_keys=frozenset({"ZG"}))
+        diffs: list[str] = []
+        tx._sync_partner_row(
+            PARTNER_PREFIX, 5, "ZG", "GP001", field="GPC Code", diffs=diffs,
+            expect_texts=OrderEditTransaction._GPC_TEXTS,
+        )
+
+        self.assertEqual(raw.findById(_parvw_id(5)).key, "ZP")
+        self.assertEqual(raw.findById(_partner_id(5)).text, "GP001")
+        self.assertEqual(diffs, ["GPC Code:(空)→GP001"])
+
     def test_unexpected_role_text_skips_write(self):
         # 闸②：key 合法但对应角色不是"负责雇员" → 不写编码。
         tx, raw = _make_transaction(role_texts={"ER": "开票方"})
