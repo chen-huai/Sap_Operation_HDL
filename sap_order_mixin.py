@@ -1077,6 +1077,7 @@ class SapOrderMixin:
             self.textBrowser.append("订单数据已处理完成")
             self.textBrowser.append("log数据:%s" % log_data_path)
             self.textBrowser.append('----------------------------------')
+            self._open_log_after_sap_run(log_data_path)
             QMessageBox.information(self, "提示信息", "订单数据已处理完成", QMessageBox.Yes)
         except Exception as msg:
             self.textBrowser.append('订单数据处理失败:%s' % msg)
@@ -1085,6 +1086,21 @@ class SapOrderMixin:
         finally:
             if sap_session is not None:
                 sap_session.close()
+
+    def _open_log_after_sap_run(self, log_data_path):
+        """SAP 创建/编辑批量流程结束后打开本次 log 文件；失败只提示，不影响流程收尾。"""
+        try:
+            if log_data_path and os.path.exists(log_data_path):
+                os.startfile(log_data_path)
+            else:
+                self.textBrowser.append(
+                    "<font color='orange'>log文件不存在，无法自动打开: %s</font>" % log_data_path
+                )
+        except Exception as exc:
+            self.textBrowser.append(
+                "<font color='orange'>log文件自动打开失败: %s</font>" % exc
+            )
+        QApplication.processEvents()
 
     def orderUnlockOrLock(self, flag):
         """批量锁定/解锁订单。
