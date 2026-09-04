@@ -64,7 +64,7 @@ class OrderEditTransaction:
 
     # 负责雇员行（CS 所在行）的界面显示文本，中/英双语环境各一。
     _EMPLOYEE_TEXTS = frozenset({"负责雇员", "Employee respons."})
-    _GPC_TEXTS = frozenset({"GPC", "Buyer(GPC)", "Buyer (GPC)"})
+    _GPC_TEXTS = frozenset({"GPC", "Buyer(GPC)", "Buyer (GPC)", "Global Partner", "送达方"})
 
     # Sales(VE) 的创建口径行位（order.py:_fill_partners 写死行 7）。行 4/5 归负责雇员与
     # Buyer(GPC)、行 6 归联系人(AP)，故 VE 从无到有时落行 7 才与创建一致。

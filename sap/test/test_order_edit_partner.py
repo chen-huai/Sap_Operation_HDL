@@ -306,6 +306,24 @@ class SyncPartnerRowTest(unittest.TestCase):
         self.assertEqual(raw.findById(_partner_id(5)).text, "GP001")
         self.assertEqual(diffs, ["GPC Code:(空)→GP001"])
 
+    def test_gpc_zg_accepts_localized_display_texts(self):
+        for display_text in ("Global Partner", "送达方"):
+            with self.subTest(display_text=display_text):
+                role_texts = {"ZG": display_text}
+                preset = {
+                    _parvw_id(5): _combo("ZG", role_texts),
+                    _partner_id(5): _Element(text="GP001"),
+                }
+                tx, raw = _make_transaction(preset, role_texts=role_texts)
+                diffs: list[str] = []
+                tx._sync_partner_row(
+                    PARTNER_PREFIX, 5, "ZG", "GP001", field="GPC Code", diffs=diffs,
+                    expect_texts=OrderEditTransaction._GPC_TEXTS,
+                )
+
+                self.assertEqual(raw.findById(_partner_id(5)).text, "GP001")
+                self.assertEqual(diffs, [])
+
     def test_unexpected_role_text_skips_write(self):
         # 闸②：key 合法但对应角色不是"负责雇员" → 不写编码。
         tx, raw = _make_transaction(role_texts={"ER": "开票方"})
