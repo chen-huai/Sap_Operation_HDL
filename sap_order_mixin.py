@@ -355,7 +355,7 @@ class SapOrderMixin:
         优先级（高→低）：
             - success=False → 红色「失败」；
             - 消息含"读取失败"（控件读不到，疑似控件 ID bug）→ 红色「异常」；
-            - warning 标记 或 消息含"已跳过"（如 SAP 无对应 item、SAP 有/Excel 无）→ 橙色「警告」；
+            - warning 标记 → 橙色「警告」；
             - 其余 → 默认色「成功」。
         """
         message = step_result.message or ''
@@ -367,7 +367,7 @@ class SapOrderMixin:
             self.textBrowser.append(
                 "<font color='red'>%s 异常: %s</font>" % (step_name, message)
             )
-        elif step_result.warning or '已跳过' in message:
+        elif step_result.warning:
             self.textBrowser.append(
                 "<font color='orange'>%s 警告: %s</font>" % (step_name, message)
             )
@@ -476,8 +476,9 @@ class SapOrderMixin:
                 data_b_entries, order, clear_diffs, item_no_map=item_no_map,
             )
             data_b_changed = clear_result.changed
-            self._append_remark(remarks, "Data B 清空", clear_result, clear_diffs)
-            _report_step('Data B 清空', clear_result)
+            clear_label = "Data B 清空" if data_b_changed else "Data B 检查"
+            self._append_remark(remarks, clear_label, clear_result, clear_diffs)
+            _report_step(clear_label, clear_result)
             if not clear_result.success:
                 self._write_edit_log(
                     log_file, log_data_path, index, order_no, remarks, sap_amount_vat
