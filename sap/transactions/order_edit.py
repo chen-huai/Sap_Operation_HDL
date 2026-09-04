@@ -47,6 +47,10 @@ class OrderEditTransaction:
     # 进入抬头详情屏的重试轮数（每轮：排空弹窗 → press → 探测页签）。
     _MAX_HEADER_ENTRY_RETRIES = 3
 
+    # 计划成本"重读→删一条多余行"循环的轮数上限，纯死循环兜底——真正的退出条件是
+    # "已无多余行"。删除失败时若不设上限会无限重试同一行，故取与行扫描上限同量级。
+    _MAX_PLAN_COST_ROUNDS = 50
+
     # 伙伴角色 PARVW key。ZG/VE 由创建路径 order.py:_fill_partners 实测确认。
     #
     # _PARVW_EMPLOYEE（负责雇员/CS 行）**至今未知**：`ER` 是 SAP SD 标准值推断，已被实机
@@ -60,6 +64,7 @@ class OrderEditTransaction:
 
     # 负责雇员行（CS 所在行）的界面显示文本，中/英双语环境各一。
     _EMPLOYEE_TEXTS = frozenset({"负责雇员", "Employee respons."})
+    _GPC_TEXTS = frozenset({"GPC", "Buyer(GPC)", "Buyer (GPC)", "Global Partner", "送达方"})
 
     # Sales(VE) 的创建口径行位（order.py:_fill_partners 写死行 7）。行 4/5 归负责雇员与
     # Buyer(GPC)、行 6 归联系人(AP)，故 VE 从无到有时落行 7 才与创建一致。
@@ -70,7 +75,6 @@ class OrderEditTransaction:
         self.session = session
         self.config = config
         self._base = OrderTransaction(session, config)
-
     # ------------------------------------------------------------------ #
     # 对比原语
     # ------------------------------------------------------------------ #
@@ -455,7 +459,7 @@ class OrderEditTransaction:
         if order.global_partner_code:
             self._sync_partner_row(
                 partner_prefix, gpc_row, self._PARVW_GPC, order.global_partner_code,
-                field="GPC Code", diffs=diffs,
+                field="GPC Code", diffs=diffs, expect_texts=self._GPC_TEXTS,
             )
 
         # Primary CS：优先按显示文本全表扫描定位负责雇员行——命中即证明该行角色正确，
@@ -573,6 +577,12 @@ class OrderEditTransaction:
             try:
                 self.session.set_key(parvw_id, parvw_key)
             except Exception:
+                try:
+                    actual = (self.session.read_text(parvw_id) or "").strip()
+                except SapUiError:
+                    actual = ""
+                if expect_texts is not None and actual in expect_texts:
+                    return True
                 diffs.append(f"{field}:角色key {parvw_key} 无效(待校正)")
                 return False
             diffs.append(f"{field}:角色 {current or '(空)'}→{parvw_key}")
@@ -767,8 +777,7 @@ class OrderEditTransaction:
                 result.message = "无 item 数据"
                 return result
 
-            existing = self._read_existing_item_rows()  # [(物理 row, item_no, material, 金额)]
-            existing_item_nos = {item_no for _, item_no, _, _ in existing if item_no}
+            existing = self._base.read_item_rows()  # [(物理 row, item_no, material, 金额)]
 
             # 分两批处理，规避"新增回车后 SAP 按 POSNR 重排导致行号失效"：
             #   ① 命中项：改金额/长文本，POSNR 不变、不触发重排，行号稳定；
@@ -786,31 +795,51 @@ class OrderEditTransaction:
                     new_items.append(item)
 
             # 批次一：命中项（进详情逐字段比对金额/长文本，仅差异才写，绝不碰只读物料）。
+            # 行号取自本批开始前的快照，而每次进详情/返回都要按键，故进详情前复核一次行身份：
+            # 相符直接用，不符实时重定位，定位不到则跳过并告警——绝不写到猜出来的行上。
             for row, item in matched:
+                actual_row = self._base.verify_item_row(row, item.item, item.material_code)
+                if actual_row is None:
+                    result.warning = True
+                    diffs.append(
+                        f"item {self._norm(item.item)} 物料 {self._norm(item.material_code)}"
+                        "：无法定位物理行，已跳过"
+                    )
+                    continue
                 _amount_text, summary = self._enter_item_and_write_condition(
-                    row, item, result, is_new=False, currency=order.currency_type
+                    actual_row, item, result, is_new=False, currency=order.currency_type
                 )
                 if summary:
                     diffs.append(summary)
 
             # 批次二：新增项。写入末尾行 → 回车（SAP 重排）→ 重读定位当前行 → 写金额/文本。
-            known_item_nos = set(existing_item_nos)
-            used_rows = set(matched_rows)
             for item in new_items:
+                # 写入前重读一次：同时拿到追加行号与"写入前的 item 号集合"，
+                # 后者是回车重排后识别新增行的唯一可靠判据（号只增不改）。
+                before = self._base.read_item_rows()
+                before_nos = {item_no for _, item_no, _, _ in before if item_no}
                 # item 号已存在则让 SAP 自动分配（write_item_no=False），避免重号。
-                write_item_no = not (self._norm(item.item) and self._norm(item.item) in known_item_nos)
-                append_row = len(self._read_existing_item_rows())
-                self._base._write_item_row(append_row, item, write_item_no=write_item_no)
+                write_item_no = not (self._norm(item.item) and self._norm(item.item) in before_nos)
+                self._base._write_item_row(len(before), item, write_item_no=write_item_no)
+                # 回车确认 → SAP 按 POSNR 升序重排 → 立刻重新确认排序再写后续信息。
                 self.session.send_vkey(0)
                 actual_row = self._relocate_new_item_row(
-                    item, write_item_no=write_item_no,
-                    known_item_nos=known_item_nos, used_rows=used_rows,
+                    item, write_item_no=write_item_no, before_nos=before_nos,
                 )
                 if actual_row is None:
-                    actual_row = append_row  # 兜底：重读定位失败时退回写入行
-                amount_text, summary = self._enter_item_and_write_condition(actual_row, item, result, is_new=True)
-                used_rows.add(actual_row)
+                    # 定位不到就不写。旧实现退回写入行，实测会把新 item 的金额写进被重排顶下来的
+                    # 另一个 item（已有 1000/1001/3000/5000 时新增 2000 → 金额写进了 5000）。
+                    result.warning = True
+                    diffs.append(
+                        f"item {self._norm(item.item) or '新'} 物料 {self._norm(item.material_code)}"
+                        "：新增后无法定位物理行，金额未写入(待人工核对)"
+                    )
+                    continue
+                amount_text, summary = self._enter_item_and_write_condition(
+                    actual_row, item, result, is_new=True
+                )
                 # 记录新增明细：write_item_no=False 时 SAP 自动改号，需 save+open 后回读映射。
+                # 定位失败的新增不入册——用假恒等映射会把 Data B 的 POSNR 指向错误 item。
                 if added_out is not None:
                     added_out.append(ItemAddInfo(
                         odm_item=self._norm(item.item),
@@ -818,8 +847,6 @@ class OrderEditTransaction:
                         amount=self._norm(amount_text),
                         auto_numbered=not write_item_no,
                     ))
-                # 重排后刷新已知号集合，供下一条新增的号冲突判定与定位。
-                known_item_nos = {n for _, n, _, _ in self._read_existing_item_rows() if n}
                 if summary:
                     diffs.append(summary)
 
@@ -846,28 +873,6 @@ class OrderEditTransaction:
         result.message = "；".join(diffs) if diffs else "item 无差异"
         return result
 
-    def _read_existing_item_rows(self, max_rows: int = 50) -> list[tuple[int, str, str, str]]:
-        """读取 item 概览页现有行的三要素 item/material/金额。
-
-        item/material/金额同在概览一行（第1/2/5格），返回 [(物理 row, item_no, material, 金额)]。
-        空行处停止扫描。金额列读不到时退回空串，不阻断扫描。
-        """
-        rows: list[tuple[int, str, str, str]] = []
-        for row in range(max_rows):
-            try:
-                item_no = (self.session.read_text(OrderTransaction._item_id(row)) or "").strip()
-                material = (self.session.read_text(OrderTransaction._material_id(row)) or "").strip()
-            except SapUiError:
-                break
-            if not item_no and not material:
-                break
-            try:
-                amount = (self.session.read_text(OrderTransaction._net_value_id(row)) or "").strip()
-            except SapUiError:
-                amount = ""
-            rows.append((row, item_no, material, amount))
-        return rows
-
     def _match_item_row(
         self, existing: list[tuple[int, str, str, str]], item: OrderItemData, matched_rows: set[int]
     ) -> int | None:
@@ -882,40 +887,34 @@ class OrderEditTransaction:
         return None
 
     def _relocate_new_item_row(
-        self, item: OrderItemData, *, write_item_no: bool, known_item_nos: set[str], used_rows: set[int]
+        self, item: OrderItemData, *, write_item_no: bool, before_nos: set[str]
     ) -> int | None:
-        """回车重排后重读概览，定位刚新增 item 的当前物理行。
+        """回车重排后重读概览，定位刚新增 item 的物理行。
 
         SAP VA02 概览页在回车确认后按 POSNR 升序重排，写入时的追加行号随即失效，
         必须按 item 身份重新定位：
             - write_item_no=True：写了 POSNR，新行 item 号 == ODM 号，按号定位；
-            - write_item_no=False：SAP 自动改号，按"物料一致 且 item 号此前未出现"定位。
-        找不到返回 None（调用方退回写入行兜底）。
+            - 上一条未命中（含 SAP 拒绝该号改为自动分配）或 write_item_no=False：
+              取"物料一致 且 item 号不在写入前号集合 before_nos"的行——号只增不改，
+              本次唯一新出现的号即新增行；号尚未渲染（空）的行同样满足"不在 before_nos"，
+              这正是刚写入尚未编号的新行。
+
+        **不再用物理行号做排他**（旧实现的 used_rows）：行号会被重排改写，把它当身份会
+        误判正确行为"已占用"，进而退回写入行、把金额写到别的 item 上——已有
+        1000/1001/3000/5000 时新增 2000（重排后落物理行 2）正是此路径。
+        找不到返回 None，由调用方告警并跳过写入。
         """
-        rows = self._read_existing_item_rows()
+        rows = self._base.read_item_rows()
         target_item = self._norm(item.item)
         target_material = self._norm(item.material_code)
         if write_item_no and target_item:
             for row, item_no, _material, _amount in rows:
-                if row not in used_rows and self._norm(item_no) == target_item:
+                if self._norm(item_no) == target_item:
                     return row
         for row, item_no, material, _amount in rows:
-            if row in used_rows:
+            if self._norm(item_no) in before_nos:
                 continue
-            if self._norm(material) == target_material and self._norm(item_no) not in known_item_nos:
-                return row
-        return None
-
-    def _find_item_physical_row(self, target_item) -> int | None:
-        """在 SAP item 概览页找 item 号等于 target_item 的物理 row；找不到返回 None。
-
-        用于计划成本按 item 定位（ODM item 编号与 SAP 实际编号可能不同，需精确匹配）。
-        """
-        target = self._norm(target_item)
-        if not target:
-            return None
-        for row, item_no, _material, _amount in self._read_existing_item_rows():
-            if self._norm(item_no) == target:
+            if self._norm(material) == target_material:
                 return row
         return None
 
@@ -935,7 +934,7 @@ class OrderEditTransaction:
         """
         mapping: dict[str, str] = {}
         self._base._ensure_item_overview()
-        existing = self._read_existing_item_rows()  # [(row, item_no, material, amount)]
+        existing = self._base.read_item_rows()  # [(row, item_no, material, amount)]
         used_rows: set[int] = set()
 
         # 先处理恒等映射项：预占其 SAP 行，防止同物料的改号新增项误抢。
@@ -964,6 +963,10 @@ class OrderEditTransaction:
 
         命中后把该物理行标记为已用（同物料多条新增按出现顺序逐一消费），返回 SAP item 号；
         物料无任何未占用行匹配时返回 None。
+
+        这里的 `used_rows` 用物理行号排他是**安全**的：调用方 build_item_no_mapping 只读一次
+        概览、整个循环内不发任何回车，行号在同一快照内恒定。与已废除的 edit_items 版本不同
+        （那边跨越了新增回车、行号会被 SAP 重排改写）——判据是"是否跨越 send_vkey"。
         """
         material = self._norm(info.material)
         # 仅接受 item 号非空的行——空号行（新增行号尚未渲染等）不能作为映射目标，否则会把
@@ -996,6 +999,50 @@ class OrderEditTransaction:
         "cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[1]/shell"
     )
 
+    # item 详情条件表（T\06）前缀；金额列 [3,row]、币种列 [4,row]、描述列 [2,row]。
+    _CONDITION_BASE = (
+        "wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\06/"
+        "ssubSUBSCREEN_BODY:SAPLV69A:6201/tblSAPLV69ATCTRL_KONDITIONEN/"
+    )
+
+    # 条件表"描述"列（中文界面表头即"描述"）控件名；2026-09-03 实机确认为 txtRV61A-VTEXT。
+    _CONDITION_TEXT_CANDIDATES = (
+        "txtRV61A-VTEXT",
+    )
+
+    # 价格条件行的描述文本。中英文界面均显示 "Price"（2026-09-03 用户实机确认），
+    # 故无需像 _EMPLOYEE_TEXTS 那样做双语集合。plan cost 行显示 "Planned Costs"。
+    _PRICE_CONDITION_TEXT = "Price"
+
+    # 条件表探测行数上限：条件行数远小于此，纯防跑飞。
+    _MAX_CONDITION_ROWS = 8
+
+    def _find_price_condition_row(self) -> tuple[int, str] | None:
+        """在 item 详情条件表中定位价格行，返回 (row, 命中的描述列控件名)；找不到返回 None。
+
+        **价格行的行号是变量，不是常量**（2026-09-03 实机确认）：
+            - 创建时录过 plan cost → row0 = Planned Costs、row1 = Price
+            - 创建时没录 plan cost → row0 = Price
+
+        旧实现把 `[3,1]` 当常量，等于赌"每单都有 plan cost"。没有 plan cost 的订单
+        row1 是只读条件行，写入抛 `Property '.text' can not be set.`，整个 item 编辑段
+        失败（实测订单 7482678489）。故改为按**描述列文本**定位——它表达"这一行是什么"，
+        而行号只表达"这一行在哪"，后者会随订单内容变化。
+        """
+        for name in self._CONDITION_TEXT_CANDIDATES:
+            for row in range(self._MAX_CONDITION_ROWS):
+                try:
+                    text = self._norm(self.session.read_text(f"{self._CONDITION_BASE}{name}[2,{row}]"))
+                except SapUiError:
+                    # 该控件名在本屏不存在 → 整个候选作废，换下一个名字（不是换行）。
+                    break
+                if not text:
+                    # 读到空行说明该控件名有效但已扫到表尾，本候选就此结束。
+                    break
+                if text == self._PRICE_CONDITION_TEXT:
+                    return row, name
+        return None
+
     def _enter_item_and_write_condition(
         self,
         row: int,
@@ -1010,8 +1057,12 @@ class OrderEditTransaction:
         新增 item 与已存在 item 的条件表布局不同，分别处理：
             - is_new：完全沿用创建侧新增步骤（物料格进详情、价格条件 [3,5] 直接写，
               币种自动继承单据币种，无需写）；
-            - 已存在：编辑对比（数量格进详情、价格条件 [3,1]，仅差异才写）；单据币种变了，
-              item 条件币种 KOEIN[4,1] 也须随抬头同步（currency=order.currency_type）。
+            - 已存在：编辑对比（数量格进详情、**按描述列实时定位价格行**，仅差异才写）；
+              单据币种变了，同一行的币种列 KOEIN[4,row] 也随抬头同步。
+
+        为何两条路径判据不同：创建时 item 尚未定价，条件表是空白模板、未必存在
+        "Price" 行，`_find_price_condition_row` 的判据不成立；而 [3,5] 在创建路径
+        一直有效、无故障报告，故不动它（见 order.py::_write_item_condition）。
         """
         if is_new:
             # 新增 item：与创建侧新增步骤一致（复用 _base 的条件/长文本写法，价格条件 [3,5]）。
@@ -1022,23 +1073,33 @@ class OrderEditTransaction:
                 self._base._write_item_long_text(item.long_text, result)
             summary = self._new_item_summary(item)
         else:
-            # 已存在 item：按 SAP 录制聚焦数量格(ZMENG[2,row])双击进详情；价格条件在编辑屏第 1 行
-            # KBETR[3,1]（创建侧的 [3,5] 在编辑屏是空行/只读行，写入会抛 Property '.text' can not be set）。
+            # 已存在 item：按 SAP 录制聚焦数量格(ZMENG[2,row])双击进详情。
             self.session.focus(OrderTransaction._quantity_id(row), 16)
             self.session.send_vkey(2)
-            condition_base = (
-                "wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\06/"
-                "ssubSUBSCREEN_BODY:SAPLV69A:6201/tblSAPLV69ATCTRL_KONDITIONEN/"
-            )
-            condition_id = f"{condition_base}txtKOMV-KBETR[3,1]"
             self.session.select_tab("wnd[0]/usr/tabsTAXI_TABSTRIP_ITEM/tabpT\\06")
+
+            # 价格行行号随"该单有没有 plan cost"变化，必须实时定位（见 _find_price_condition_row）。
+            located = self._find_price_condition_row()
+            if located is None:
+                # 定位不到就不写：写到猜出来的行上要么被 SAP 拒（只读行），要么改掉
+                # plan cost 那一行的金额——后者更糟，是静默改错数据。
+                result.warning = True
+                self.session.press("wnd[0]/tbar[0]/btn[3]")
+                return "", (
+                    f"item {self._norm(item.item)} 物料 {self._norm(item.material_code)}"
+                    "：未找到 Price 条件行，金额未写入(待人工核对)"
+                )
+            condition_row, _text_column = located
+            condition_id = f"{self._CONDITION_BASE}txtKOMV-KBETR[3,{condition_row}]"
             amount_diff = self._diff_set(condition_id, item.revenue, amount=True)
-            # 单据币种变了，同一条件行的币种列 KOEIN[4,1] 也随抬头同步（仅差异才写）。
+            # 币种列 KOEIN[4,row] **必须与价格行同行**（用户 2026-09-03 确认的业务约束）：
+            # 它同样随"该单有没有 plan cost"整行平移，绝不能写死行号，否则没有 plan cost 的
+            # 订单会去改 plan cost 行的币种。故复用上面定位到的 condition_row。
             # 仅在能读到现有币种值时才对比：已定价 item 的 KOEIN 恒有币种，读到空串
             # 说明控件异常/无条件行，此时不盲写（口径同 _edit_sold_to 读不到即跳过）。
             currency_diff = None
             if currency is not None:
-                currency_id = f"{condition_base}ctxtRV61A-KOEIN[4,1]"
+                currency_id = f"{self._CONDITION_BASE}ctxtRV61A-KOEIN[4,{condition_row}]"
                 try:
                     current_currency = self._norm(self.session.read_text(currency_id))
                 except SapUiError:
@@ -1577,12 +1638,14 @@ class OrderEditTransaction:
             - SAP 有 Excel 无 → Shift+F2 删除（倒序，避免行号位移），日志 `…：Excel 无，已删除`；
             - 全认领且金额全等（含顺序不同）→ 零写入零回车，`Plan Cost 无差异`。
 
-        执行顺序：①改金额（行号稳定先做）→ ②倒序删多余 → ③追加新增（删后重读行数取起始 row）。
+        执行顺序：①改金额 → ②删多余 → ③追加新增。**三阶段各自实时重读编辑器**，不共用
+        快照行号：每次改金额/删除/追加都伴随一次回车，SAP 可能重排行，一次快照撑不到收尾。
         """
         result = SapResult(step="edit_plan_cost")
         try:
             self._base._ensure_item_overview()
-            focus_row = self._find_item_physical_row(target_item)
+            # 先重新确认 item 排序，再决定进哪一行的计划成本编辑器。
+            focus_row = self._base.find_item_row_by_no(target_item)
             if focus_row is None:
                 # SAP 无此 item：不失败、不开编辑器，但标 warning 让 UI 用区别色提示。
                 result.warning = True
@@ -1591,50 +1654,55 @@ class OrderEditTransaction:
             self._open_plan_cost_editor_for_edit(OrderTransaction._material_id(focus_row))
 
             valid = [e for e in entries if e.cost_center]
-            existing = self._read_existing_plan_cost_rows()  # [(row, cost_center, category, amount)]
 
-            # SAP 行按 (归一中心,类别) 主键分组，供 Excel entry 认领（对顺序免疫；同键多行按 row 升序消费）。
-            sap_by_key: dict[tuple[str, str], list[tuple[int, str, str, str]]] = {}
-            for row_tuple in existing:
-                key = (self._norm_no(row_tuple[1]), self._norm(row_tuple[2]))
-                sap_by_key.setdefault(key, []).append(row_tuple)
-
-            # 阶段①：认领 + 仅金额差异才改（行号此时稳定，最先做）。认领不到的 entry 记为待新增。
-            matched_rows: set[int] = set()
+            # 阶段①：认领 + 仅金额差异才改。每条前重读并按主键定位，同键多行按"已消费次数"
+            # 取第 n+1 条——对行序免疫，也不受上一条写入触发的重排影响。
+            consumed: Counter = Counter()
             to_add: list[PlanCostEntry] = []
             for entry in valid:
                 key = (self._norm_no(entry.cost_center), self._norm(entry.category))
-                bucket = sap_by_key.get(key)
-                if bucket:
-                    row, _center, _category, old_amount = bucket.pop(0)
-                    matched_rows.add(row)
-                    summary = self._overwrite_plan_cost_amount(row, entry, old_amount)
-                    if summary:
-                        diffs.append(summary)
-                else:
+                located = self._find_plan_cost_row(key, consumed[key])
+                if located is None:
                     to_add.append(entry)
+                    continue
+                consumed[key] += 1
+                row, old_amount = located
+                summary = self._overwrite_plan_cost_amount(row, entry, old_amount)
+                if summary:
+                    diffs.append(summary)
 
-            # 阶段②：SAP 有 Excel 无 → 倒序删除，避免删除后行号位移。
-            leftover = sorted(
-                (t for t in existing if t[0] not in matched_rows),
-                key=lambda t: t[0],
-                reverse=True,
+            # 阶段②：SAP 有 Excel 无 → 每轮重读、删最末一条多余行，直到无多余。
+            # 逐轮重读而非一次算好倒序删：删除本身会让后续行上移，且阶段①的写入可能已重排。
+            expected: Counter = Counter(
+                (self._norm_no(e.cost_center), self._norm(e.category)) for e in valid
             )
-            for row, cost_center, category, amount in leftover:
+            for _ in range(self._MAX_PLAN_COST_ROUNDS):
+                rows = self._base.read_plan_cost_rows()
+                extra = self._find_extra_plan_cost_rows(rows, expected)
+                if not extra:
+                    break
+                row, cost_center, category, amount = extra[-1]
                 self._delete_plan_cost_row(row)
                 label = self._plan_cost_label(category)
                 diffs.append(
                     f"{self._plan_cost_head(cost_center, category)} {label} {amount}：Excel 无，已删除"
                 )
+                # 进展校验：删除未让行数减少说明 Shift+F2 没生效（行被锁定/焦点没落对）。
+                # 不校验就会对同一行空转到轮数上限，刷出几十条重复日志还掩盖真实原因。
+                if len(self._base.read_plan_cost_rows()) >= len(rows):
+                    result.warning = True
+                    diffs.append(
+                        f"{self._plan_cost_head(cost_center, category)}：删除未生效，"
+                        "剩余多余行未处理(待人工核对)"
+                    )
+                    break
 
-            # 阶段③：Excel 有 SAP 无 → 删后重读行数，从当前末尾逐行追加（全写四列，口径同创建）。
-            # 仅在确有新增时才重读，避免"无新增"常见场景多一次 SAP 往返。
-            if to_add:
-                next_row = len(self._read_existing_plan_cost_rows())
-                for entry in to_add:
-                    self._base._apply_single_plan_cost_entry(next_row, entry)
-                    diffs.append(self._plan_cost_add_summary(entry))
-                    next_row += 1
+            # 阶段③：Excel 有 SAP 无 → 每条前重读行数追加到当前末尾（全写四列，口径同创建）。
+            for entry in to_add:
+                self._base._apply_single_plan_cost_entry(
+                    len(self._base.read_plan_cost_rows()), entry
+                )
+                diffs.append(self._plan_cost_add_summary(entry))
 
             self.session.press("wnd[0]/tbar[0]/btn[3]")
             # 退出编辑器时若弹"是否保存"确认框，按 OPTION1 兜底确认（无则跳过）。
@@ -1666,23 +1734,38 @@ class OrderEditTransaction:
         self._try_press("wnd[1]/usr/btnSPOP-VAROPTION1")
         self._try_press("wnd[1]/tbar[0]/btn[0]")
 
-    def _read_existing_plan_cost_rows(self, max_rows: int = 50) -> list[tuple[int, str, str, str]]:
-        """读取计划成本编辑器现有行，返回 [(row, cost_center, category, amount)]。空行处停止。"""
-        rows: list[tuple[int, str, str, str]] = []
-        for row in range(max_rows):
-            try:
-                cost_center = (self.session.read_text(self._pc_center_id(row)) or "").strip()
-                category = (self.session.read_text(self._pc_category_id(row)) or "").strip()
-            except SapUiError:
-                break
-            if not cost_center and not category:
-                break
-            try:
-                amount = (self.session.read_text(self._pc_amount_id(row)) or "").strip()
-            except SapUiError:
-                amount = ""
-            rows.append((row, cost_center, category, amount))
-        return rows
+    def _find_plan_cost_row(self, key: tuple[str, str], skip_count: int) -> tuple[int, str] | None:
+        """实时重读编辑器，返回主键 key 命中的第 skip_count+1 条行的 (row, 金额原文)。
+
+        skip_count 表示该键已被前面的 entry 消费掉几条：同键多行时按当前表中的出现顺序
+        依次认领，不依赖上一次快照的行号（对回车后的重排免疫）。找不到返回 None。
+        """
+        seen = 0
+        for row, cost_center, category, amount in self._base.read_plan_cost_rows():
+            if (self._norm_no(cost_center), self._norm(category)) != key:
+                continue
+            if seen == skip_count:
+                return row, amount
+            seen += 1
+        return None
+
+    def _find_extra_plan_cost_rows(
+        self, rows: list[tuple[int, str, str, str]], expected: Counter
+    ) -> list[tuple[int, str, str, str]]:
+        """在编辑器行快照中挑出超出 Excel 期望多重集的行（按 row 升序，调用方取末条删）。
+
+        按主键逐行核销 expected：核销得掉的是 Excel 要保留的行，核销不掉的即多余行。
+        用多重集而非集合，保证同键"Excel 2 条 / SAP 3 条"时只删掉多出的那 1 条。
+        """
+        remaining = Counter(expected)
+        extra: list[tuple[int, str, str, str]] = []
+        for row_tuple in rows:
+            key = (self._norm_no(row_tuple[1]), self._norm(row_tuple[2]))
+            if remaining[key] > 0:
+                remaining[key] -= 1
+            else:
+                extra.append(row_tuple)
+        return extra
 
     def _plan_cost_label(self, category) -> str:
         """计划成本数量列标签：T01AST(工时)→"时间"，其余→"金额"。"""

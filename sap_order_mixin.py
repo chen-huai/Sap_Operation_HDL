@@ -192,11 +192,13 @@ class SapOrderMixin:
     def _build_order_from_dataframes(self, order_row, item_df):
         """从订单头和 item 表构建 SAP 订单对象。
 
-        items 列表会按 item 号数字升序做稳定排序，让 list 索引语义对齐 SAP VA02
-        item 概览页回车后的物理 row 顺序（SAP 按 POSNR 升序自动重排）。
+        items 列表会按 item 号数字升序做稳定排序，让写入顺序贴近 SAP VA02 item 概览页
+        回车后的物理 row 顺序（SAP 按 POSNR 升序自动重排），减少重排幅度。
         空 / 非数字 item 保持 Excel 相对顺序排到末尾，对应 SAP 自动分配新号的行。
-        排序后的不变量"order.items 索引 = SAP 物理 row"贯穿 _write_item_rows、
-        _find_item_row 和 plan cost 循环，消除上游 Excel 顺序与 SAP 行号错位的隐患。
+
+        注意：这里**只是对齐，不构成正确性依赖**。SAP 侧的行号一律由 `read_item_rows` /
+        `find_item_row` 实时重读定位（见 order.py 同名方法），空 item 号由 SAP 自动分配、
+        与 Excel 顺序无关，故"列表索引 == 物理 row"从来不是可以依赖的不变量。
         """
         order_items_df = self._filter_related_rows(item_df, order_row)
         items = []
@@ -611,18 +613,6 @@ class SapOrderMixin:
         return [item for _, item in sorted(enumerate(items), key=_key)]
 
     @staticmethod
-    def _find_item_row(order, item_no):
-        """根据 item 编号定位 SAP item 表格中的物理行号。
-
-        order.items 已由 _sort_items_for_sap 在适配层排好序，list 索引即 SAP 物理 row；
-        本方法直接 enumerate 查找即可，无需再次排序。找不到时返回 0 作为兜底。
-        """
-        for row, item in enumerate(order.items):
-            if item.item == item_no:
-                return row
-        return 0
-
-    @staticmethod
     def _extract_order_no(session):
         """优先读取 VBELN，其次从状态栏中提取已保存的订单号。"""
         try:
@@ -950,15 +940,16 @@ class SapOrderMixin:
                             _report_step('Add Item', item_result)
 
                         if flow_options.get('planCostCheck') and not item_failed:
-                            # 按 order.items 顺序（即 SAP 物理 row 顺序）调度 plan cost，
-                            # 避免字典插入顺序（来自 sub 表出现顺序）与 SAP 行号顺序不一致；
+                            # 按 item 号让 SAP 侧实时定位物理行（target_item）——SAP 写完 item
+                            # 回车后按 POSNR 重排，列表索引不等于物理行；索引仅作 Excel 未给
+                            # item 号（由 SAP 自动分配）时的兜底。
                             # sub 表未提供 plan cost 数据的 item 直接跳过。
                             for row, item in enumerate(order.items):
                                 plan_cost_entries = plan_cost_entries_by_item.get(item.item)
                                 if not plan_cost_entries:
                                     continue
                                 plan_result = service.apply_plan_cost_entries(
-                                    plan_cost_entries, focus_row=row
+                                    plan_cost_entries, focus_row=row, target_item=item.item
                                 )
                                 first_va02_changed = first_va02_changed or plan_result.success
                                 remarks.append(

@@ -416,15 +416,45 @@ class OrderTransaction:
         return items
 
     def _write_item_rows(self, order: OrderData, result: SapResult) -> str:
+        """写入全部 item 行 → 回车 → 重读定位 → 逐条进详情写金额/长文本。
+
+        第二轮**绝不复用第一轮的写入行号**：回车会让 SAP 按 POSNR 升序重排，写入顺序
+        与物理行顺序不再等价（Excel 侧 `_sort_items_for_sap` 的预排序只对"全部 item 号
+        都是数字且不与已有号冲突"成立，SAP 自动分配号的行不在其保证范围内）。
+        故回车后立刻重读概览、按 (item 号, 物料) 解析每条的真实行。
+        """
         items = self._resolve_order_items(order)
         sap_amount_total = 0.0
         sap_amount_text = ""
 
         for row, item in enumerate(items):
             self._write_item_row(row, item)
+        # 回车让 SAP 落行并按 POSNR 升序重排——写入时的行号自此失效。
         self.session.send_vkey(0)
 
-        for row, item in enumerate(items):
+        # 重排后立刻重新确认 item 排序，把每个 item 映射到它的真实物理行。
+        snapshot = self.read_item_rows()
+        claimed: set[int] = set()
+        targets: list[tuple[int | None, OrderItemData]] = []
+        for item in items:
+            row = self.find_item_row(
+                item.item, item.material_code, rows=snapshot, skip_rows=claimed
+            )
+            if row is not None:
+                claimed.add(row)
+            targets.append((row, item))
+
+        for row, item in targets:
+            # 写前再确认一次：条件写入会触发 SAP 重算，行位有可能再次变化。
+            row = None if row is None else self.verify_item_row(row, item.item, item.material_code)
+            if row is None:
+                # 定位不到宁可跳过：写到猜出来的行上会覆盖另一个 item 的金额。
+                result.warning = True
+                result.append_message(
+                    f"item {self._norm_text(item.item) or '(空)'} "
+                    f"物料 {self._norm_text(item.material_code)} 未能定位物理行，金额未写入"
+                )
+                continue
             self.session.focus(self._material_id(row), 10)
             self.session.send_vkey(2)
             amount_text = self._write_item_condition(format(item.revenue, ".2f"))
@@ -503,6 +533,126 @@ class OrderTransaction:
             "wnd[0]/usr/tabsTAXI_TABSTRIP_HEAD/tabpT\\14/"
             "ssubSUBSCREEN_BODY:SAPMV45A:4312/txtZAUFTD-AUFTRAGSWERT"
         )
+
+    # ------------------------------------------------------------------ #
+    # item 概览行的实时读取与身份定位（创建/编辑共用）
+    #
+    # SAP 在 item 概览页回车后按 POSNR 升序**强制重排**，写入时的物理行号随即失效
+    # （实测：已有 1000/1001/3000/5000 时新增 2000，2000 落到物理行 2，后两条顺延）。
+    # 故本节确立统一口径：物理行号只在"同一次快照内"有效，跨越任何 send_vkey 一律作废；
+    # 任何"进 item 详情 / 按 item 开计划成本"之前，都必须先重读、再按身份（item 号 + 物料）
+    # 定位。定位不到宁可跳过并告警，也绝不写到猜出来的行上——写错行会覆盖别的 item 的金额。
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _norm_text(value) -> str:
+        """控件文本归一化：None → 空串，其余去首尾空白。行定位的统一比对口径。"""
+        return "" if value is None else str(value).strip()
+
+    def read_item_rows(self, max_rows: int = 50) -> list[tuple[int, str, str, str]]:
+        """读 item 概览页现有行，返回 [(物理 row, item 号, 物料, 净值)]；空行处停止。
+
+        item / 物料 / 净值同在概览一行（第 1/2/5 格）。净值列读不到时退回空串，
+        不阻断扫描——净值只用于消歧兜底，缺失不应让整次定位失败。
+        """
+        rows: list[tuple[int, str, str, str]] = []
+        for row in range(max_rows):
+            try:
+                item_no = self._norm_text(self.session.read_text(self._item_id(row)))
+                material = self._norm_text(self.session.read_text(self._material_id(row)))
+            except SapUiError:
+                break
+            if not item_no and not material:
+                break
+            try:
+                amount = self._norm_text(self.session.read_text(self._net_value_id(row)))
+            except SapUiError:
+                amount = ""
+            rows.append((row, item_no, material, amount))
+        return rows
+
+    def find_item_row_by_no(self, item_no) -> int | None:
+        """实时重读概览页，返回 item 号等于 item_no 的物理行；找不到返回 None。
+
+        供"按 item 打开计划成本编辑器"使用：ODM 编号与 SAP 实际编号可能不同，
+        调用方须传 SAP 侧的真实号。
+        """
+        target = self._norm_text(item_no)
+        if not target:
+            return None
+        for row, no, _material, _amount in self.read_item_rows():
+            if no == target:
+                return row
+        return None
+
+    def find_item_row(
+        self,
+        item_no,
+        material,
+        *,
+        rows: list[tuple[int, str, str, str]] | None = None,
+        skip_rows: set[int] | None = None,
+    ) -> int | None:
+        """按 (item 号, 物料) 双键定位物理行；item 号为空时退化为物料匹配。
+
+        Args:
+            rows: 已读到的概览快照；不传则实时重读（默认即"实时"）。
+            skip_rows: 已被其他 item 认领的行。**仅在同一次快照内有效**——
+                跨 send_vkey 复用会重蹈"物理行号当身份"的覆辙。
+        """
+        snapshot = self.read_item_rows() if rows is None else rows
+        target_no = self._norm_text(item_no)
+        target_material = self._norm_text(material)
+        skip = skip_rows or set()
+        for row, no, mat, _amount in snapshot:
+            if row in skip or mat != target_material:
+                continue
+            if not target_no or no == target_no:
+                return row
+        return None
+
+    def verify_item_row(self, row: int, item_no, material) -> int | None:
+        """写前校验：确认 row 上确实是目标 item；不符则实时重定位；仍找不到返回 None。
+
+        这是"写行内数据前必须确认排序"的落地点：即使调用方刚定位过，其间任何一次
+        回车都可能让 SAP 重排，故进详情前再确认一次，成本仅两次读取。
+        """
+        try:
+            current_no = self._norm_text(self.session.read_text(self._item_id(row)))
+            current_material = self._norm_text(self.session.read_text(self._material_id(row)))
+        except SapUiError:
+            current_no = current_material = ""
+        target_no = self._norm_text(item_no)
+        target_material = self._norm_text(material)
+        if current_material == target_material and (not target_no or current_no == target_no):
+            return row
+        return self.find_item_row(item_no, material)
+
+    def read_plan_cost_rows(self, max_rows: int = 50) -> list[tuple[int, str, str, str]]:
+        """读计划成本编辑器现有行，返回 [(row, 成本中心, 类别, 金额)]；空行处停止。
+
+        与 read_item_rows 同款口径：编辑器内每次回车后行位都可能变化，调用方须重读。
+        """
+        rows: list[tuple[int, str, str, str]] = []
+        for row in range(max_rows):
+            try:
+                cost_center = self._norm_text(
+                    self.session.read_text(f"wnd[0]/usr/tblSAPLKKDI1301_TC/ctxtRK70L-HERK2[3,{row}]")
+                )
+                category = self._norm_text(
+                    self.session.read_text(f"wnd[0]/usr/tblSAPLKKDI1301_TC/ctxtRK70L-HERK3[4,{row}]")
+                )
+            except SapUiError:
+                break
+            if not cost_center and not category:
+                break
+            try:
+                amount = self._norm_text(
+                    self.session.read_text(f"wnd[0]/usr/tblSAPLKKDI1301_TC/txtRK70L-MENGE[6,{row}]")
+                )
+            except SapUiError:
+                amount = ""
+            rows.append((row, cost_center, category, amount))
+        return rows
 
     def _sum_item_net_values(self, max_rows: int = 200) -> tuple[float, bool]:
         """读 item 概览各行未税净值(VBAP-NETWR)加和；遇空行(POSNR 为空/读不到)停止。
@@ -617,12 +767,17 @@ class OrderTransaction:
         entries: list[PlanCostEntry],
         *,
         focus_row: int = 0,
+        target_item: str | None = None,
     ) -> SapResult:
         """按已计算好的计划成本明细写入计划成本。
 
         Args:
             entries: 计划成本明细列表（PlanCostEntry）。
-            focus_row: SAP item 表格中需要进入计划成本界面的行号。
+            target_item: 目标 item 号。传入时**按号在概览页实时定位物理行**（推荐口径）——
+                SAP 回车后按 POSNR 重排，调用方的列表索引不等于物理行；SAP 无该 item 时
+                标 warning 并跳过，绝不开着编辑器写到别的 item 上。
+            focus_row: 仅在 target_item 为空（Excel 未提供 item 号，由 SAP 自动分配）时
+                使用的兜底行号。
 
         Returns:
             SapResult: 写入成功或失败信息。
@@ -632,11 +787,21 @@ class OrderTransaction:
             # 幂等切到 item 概览页：消除对前置步骤（Data B / Add Item / 多 item 循环）页面状态的隐式依赖。
             # 旧实现盲按 btn[3]，多 item 循环第二次会从 item 概览再退一级，触发"保存？"弹窗并把数据写错行。
             self._ensure_item_overview()
+            if self._norm_text(target_item):
+                # 先重新确认 item 排序，再决定进哪一行的计划成本。
+                located = self.find_item_row_by_no(target_item)
+                if located is None:
+                    result.warning = True
+                    result.message = f"SAP 无对应 item {self._norm_text(target_item)}，plan cost 已跳过"
+                    return result
+                focus_row = located
             self._open_plan_cost_editor(self._material_id(focus_row))
-            for row, entry in enumerate(entries):
+            for entry in entries:
                 if not entry.cost_center:
                     continue
-                self._apply_single_plan_cost_entry(row, entry)
+                # 每条前重读行数取追加位置：编辑器内每次回车后 SAP 都可能重排/合并行，
+                # 用 enumerate 递推会把后续条目写到已有行上。
+                self._apply_single_plan_cost_entry(len(self.read_plan_cost_rows()), entry)
             self.session.press("wnd[0]/tbar[0]/btn[3]")
             self.session.press("wnd[1]/usr/btnSPOP-OPTION1")
         except Exception as exc:

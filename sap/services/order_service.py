@@ -70,17 +70,21 @@ class OrderService:
         entries: list[PlanCostEntry],
         *,
         focus_row: int = 0,
+        target_item: str | None = None,
     ) -> SapResult:
         """按已计算好的计划成本明细写入计划成本。
 
         Args:
             entries: 计划成本明细列表（PlanCostEntry）。
-            focus_row: SAP item 表格中需要进入计划成本界面的行号。
+            target_item: 目标 item 号；传入时按号在 SAP 概览页实时定位物理行（推荐）。
+            focus_row: target_item 为空时的兜底行号。
 
         Returns:
             SapResult: SAP 写入结果。
         """
-        return self.transaction.apply_plan_cost_entries(entries, focus_row=focus_row)
+        return self.transaction.apply_plan_cost_entries(
+            entries, focus_row=focus_row, target_item=target_item
+        )
 
     def save(self, info: str) -> SapResult:
         """保存当前订单页面。"""
