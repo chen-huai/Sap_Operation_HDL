@@ -31,9 +31,9 @@ except ImportError as err:
 
 # ====================== 项目配置（复用时修改此处）======================
 CONFIG = {
-    'main_script': 'Sap_Operate_HDL.py',   # 主程序文件
-    'icon_file':   'ch.ico',                  # 图标文件（.ico）
-    'exe_name':    'Sap_Operate_HDL',        # 输出 EXE 名称（不含扩展名）
+    'main_script': 'Sap_Operate_CPS.py',      # 主程序文件
+    'icon_file':   'Sap_Operate_Logo.ico',    # 图标文件（.ico）
+    'exe_name':    'Sap_Operate_CPS',         # 输出 EXE 名称（不含扩展名）
     'console':     False,                      # True=显示控制台，False=窗口模式
 }
 

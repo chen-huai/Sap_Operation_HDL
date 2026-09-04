@@ -30,6 +30,7 @@ from sap import CostOptions, OrderData, OrderService, PartnerOptions, RevenueDat
 # 配置结构版本号：每次修改 createConfigContent 默认配置（新增/删除项、调整段结构）后 +1，
 # 老用户启动时若桌面文件版本落后，会自动执行一次智能合并迁移（保留自定义值与人员名单）。
 CONFIG_VERSION = 2
+CONFIG_FILE_NAME = 'config_sap_CPS.csv'
 
 
 def _publish_runtime_globals(source):
@@ -61,7 +62,7 @@ class ConfigMixin:
         desktopUrl = os.path.join(os.path.expanduser("~"), 'Desktop')
         configFileUrl = '%s/config' % desktopUrl
         _publish_runtime_globals(globals())
-        configFile = os.path.exists('%s/config_sap_HDL.csv' % configFileUrl)
+        configFile = os.path.exists('%s/%s' % (configFileUrl, CONFIG_FILE_NAME))
         # print(desktopUrl,configFileUrl,configFile)
         if not configFile:  # 判断是否存在文件夹如果不存在则创建为文件夹
             reply = QMessageBox.question(self, '信息', '确认是否要创建配置文件', QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
@@ -79,7 +80,7 @@ class ConfigMixin:
             self.__class__.getConfigContent(self)
     def getConfigContent(self):
         # 配置文件
-        csvFile = pd.read_csv('%s/config_sap_HDL.csv' % configFileUrl, names=['A', 'B', 'C'])
+        csvFile = pd.read_csv('%s/%s' % (configFileUrl, CONFIG_FILE_NAME), names=['A', 'B', 'C'])
         global configContent
         global username
         global role
@@ -200,10 +201,10 @@ class ConfigMixin:
         configContent = self._default_config_rows()
         config = np.array(configContent, dtype=object)
         df = pd.DataFrame(config)
-        df.to_csv('%s/config_sap_HDL.csv' % configFileUrl, index=0, header=0, encoding='utf_8_sig')
+        df.to_csv('%s/%s' % (configFileUrl, CONFIG_FILE_NAME), index=0, header=0, encoding='utf_8_sig')
         self.textBrowser.append("配置文件创建成功")
         QMessageBox.information(self, "提示信息",
-                                "默认配置文件已经创建好，\n如需修改请在用户桌面查找config文件夹中config_sap_HDL.csv，\n将相应的文件内容替换成用户需求即可，修改后记得重新导入配置文件。",
+                                "默认配置文件已经创建好，\n如需修改请在用户桌面查找config文件夹中%s，\n将相应的文件内容替换成用户需求即可，修改后记得重新导入配置文件。" % CONFIG_FILE_NAME,
                                 QMessageBox.Yes)
 
     @staticmethod
@@ -262,7 +263,7 @@ class ConfigMixin:
         桌面配置版本落后于代码 CONFIG_VERSION 时，备份原文件并执行智能合并写回；
         失败时沿用原配置不阻断启动。
         """
-        config_path = '%s/config_sap_HDL.csv' % configFileUrl
+        config_path = '%s/%s' % (configFileUrl, CONFIG_FILE_NAME)
         try:
             old_df = pd.read_csv(config_path, names=['A', 'B', 'C'])
         except Exception as exc:
@@ -287,8 +288,8 @@ class ConfigMixin:
             df = pd.DataFrame(np.array(merged_rows, dtype=object))
             df.to_csv(config_path, index=0, header=0, encoding='utf_8_sig')
             self.textBrowser.append(
-                "配置已从 v%s 升级到 v%s（已保留自定义设置与人员名单，备份: config_sap_HDL.csv.bak）"
-                % (old_version, CONFIG_VERSION)
+                "配置已从 v%s 升级到 v%s（已保留自定义设置与人员名单，备份: %s.bak）"
+                % (old_version, CONFIG_VERSION, CONFIG_FILE_NAME)
             )
         except Exception as exc:
             self.textBrowser.append(

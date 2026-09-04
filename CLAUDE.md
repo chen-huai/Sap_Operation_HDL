@@ -11,7 +11,7 @@
 ```mermaid
 graph TD
     subgraph GUI层
-        A[Sap_Operate_HDL.py<br/>主入口 MyMainWindow] --> B[Sap_Operate_Ui.py<br/>Qt Designer 生成 UI]
+        A[Sap_Operate_CPS.py<br/>主入口 MyMainWindow] --> B[Sap_Operate_Ui.py<br/>Qt Designer 生成 UI]
         A --> C[Data_Table.py<br/>表格窗口]
         C --> D[Table_Ui.py<br/>表格 UI 代码]
         A --> TM[theme_manager_theme.py<br/>主题管理]
@@ -68,7 +68,7 @@ graph TD
 
 | 模块 | 路径 | 职责 |
 |------|------|------|
-| 主入口 | `Sap_Operate_HDL.py` | `MyMainWindow` 多 mixin 继承入口，事件绑定 + 应用启动 |
+| 主入口 | `Sap_Operate_CPS.py` | `MyMainWindow` 多 mixin 继承入口，事件绑定 + 应用启动 |
 | UI Mixin | `main_window_ui_mixin.py` | UI 初始化、主题、状态栏、版本菜单 |
 | 配置 Mixin | `config_mixin.py` | `getConfig` 加载 csv、`getGuiData` 读取 GUI 字段 |
 | 订单 Mixin | `sap_order_mixin.py` | `odmDataToSap` 多 sheet Excel 批量创建订单、`orderUnlockOrLock` 锁/解锁 |
@@ -107,13 +107,13 @@ graph TD
 
 ```bash
 # 运行主程序
-python Sap_Operate_HDL.py
+python Sap_Operate_CPS.py
 
 # 构建可执行文件
 python build_with_pyinstaller.py
 
 # 手动 PyInstaller
-pyinstaller --onefile --windowed --clean --noconfirm --icon=Sap_Operate_Logo.ico Sap_Operate_HDL.py
+pyinstaller --onefile --windowed --clean --noconfirm --icon=Sap_Operate_Logo.ico Sap_Operate_CPS.py
 ```
 
 ## 数据流
@@ -141,7 +141,7 @@ pyinstaller --onefile --windowed --clean --noconfirm --icon=Sap_Operate_Logo.ico
 
 ## 配置
 
-- 桌面 `config/config_sap.csv` — 用户配置文件
+- 桌面 `config/config_sap_CPS.csv` — 用户配置文件
 - `auto_updater/config_constants.py` — 版本号与更新配置
 
 ## 文件命名约定

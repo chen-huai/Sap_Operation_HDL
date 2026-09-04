@@ -1226,18 +1226,16 @@ class OrderEditTransaction:
                 diffs.append(
                     f"Data B 读满 {len(zul)}/{len(kos)} 行（判停失效，疑似空行回读非空），按有差异处理"
                 )
+                diffs.append(self._data_b_snapshot_note(zul, kos, expected))
             else:
                 diff_desc = self._data_b_diff(zul, kos, expected, order)
                 if not diff_desc:
                     return SapResult(
                         step="clear_data_b",
                         changed=False,
-                        message=f"Data B 与 Excel 一致，已跳过（{rate_note}）",
+                        message=f"Data B 无差异（{rate_note}）",
                     )
                 diffs.append(f"{diff_desc}（{rate_note}）")
-            # 判定为有差异时一并输出两表原文快照与 Excel 期望值：归一化后的比对结果看不出
-            # 根因（回读格式、编号体系、多余空行都会导致"看起来一样却判不一致"）。
-            diffs.append(self._data_b_snapshot_note(zul, kos, expected))
 
             # 分两阶段删空，规避两个子表行数不一致：强制成本中心行只在 ZULEISTENDE
             # (执行部门) 有行、KOSTENSAETZE (费率/POSNR/固定价格) 无行。
@@ -1370,8 +1368,8 @@ class OrderEditTransaction:
            降级规则：费率列读不到 → 两侧该位置置空（退化为 POSNR+金额）；
            sales_group == '240' 不写 item 号 → 两侧 POSNR 置空。
 
-        差异描述带上两侧实际值：SAP 回读格式与 Excel 不同（如金额小数分隔符、item 前导零）
-        会让比对恒不相等、短路永不生效，日志里能直接看出是格式问题还是真实数据差异。
+        差异描述按业务动作表达：新增/删除/修改哪条 Data B。调试用原始快照仅在判停截断等
+        异常场景输出，避免日常 UI 消息被 SAP 内部表结构噪音淹没。
         """
         normal = [e for e in entries if not e.kostl_only]
 
@@ -1384,34 +1382,118 @@ class OrderEditTransaction:
             if cls._norm_no(e.performer_cost_center)
         }
         missing = excel_centers - sap_centers
+        notes: list[str] = []
         if missing:
-            return (
-                f"执行部门缺少={cls._fmt_bag(sorted(missing))} "
-                f"SAP={cls._fmt_bag(sorted(sap_centers))} Excel={cls._fmt_bag(sorted(excel_centers))}"
-            )
+            notes.append("新增执行部门 " + "、".join(sorted(missing)))
 
         # ② 成本表：三字段成行比对。读不到的费率列 / 240 订单的 POSNR 两侧同时置空，等价于不比该字段。
         use_rate = cls._rate_centers_readable(kos)
         use_item = order.sales_group != "240"
-        sap_bag = Counter(
+        sap_rows = [
             (
                 cls._norm_no(k[0]) if use_rate else "",
                 cls._norm_no(k[1]) if use_item else "",
                 cls._norm_amount(k[2]),
             )
             for k in kos
-        )
-        excel_bag = Counter(
+        ]
+        excel_rows = [
             (
                 (cls._norm_no(e.rate_cost_center) or cls._norm_no(e.performer_cost_center)) if use_rate else "",
                 cls._norm_no(cls._first_item_no(e.item)) if use_item else "",
                 cls._norm_amount(e.amount),
             )
             for e in normal
+        ]
+        notes.extend(cls._data_b_cost_diff_notes(sap_rows, excel_rows, use_rate=use_rate, use_item=use_item))
+        return "Data B 有差异：" + "；".join(notes) if notes else ""
+
+    @classmethod
+    def _data_b_cost_diff_notes(
+        cls,
+        sap_rows: list[tuple[str, str, str]],
+        excel_rows: list[tuple[str, str, str]],
+        *,
+        use_rate: bool,
+        use_item: bool,
+    ) -> list[str]:
+        """把成本表三元组差异渲染成新增/删除/修改语句。"""
+        sap_remaining = Counter(sap_rows)
+        excel_remaining = Counter(excel_rows)
+        for row in list(sap_remaining):
+            matched = min(sap_remaining[row], excel_remaining[row])
+            if matched:
+                sap_remaining[row] -= matched
+                excel_remaining[row] -= matched
+                if sap_remaining[row] <= 0:
+                    del sap_remaining[row]
+                if excel_remaining[row] <= 0:
+                    del excel_remaining[row]
+
+        notes: list[str] = []
+        for excel_row in list(excel_remaining.elements()):
+            match = next(
+                (sap_row for sap_row in sap_remaining if sap_row[:2] == excel_row[:2]),
+                None,
+            )
+            if match is None:
+                continue
+            notes.append(
+                cls._format_data_b_cost_note(
+                    "修改成本行", excel_row, use_rate=use_rate, use_item=use_item,
+                    old_amount=match[2],
+                )
+            )
+            excel_remaining[excel_row] -= 1
+            sap_remaining[match] -= 1
+            if excel_remaining[excel_row] <= 0:
+                del excel_remaining[excel_row]
+            if sap_remaining[match] <= 0:
+                del sap_remaining[match]
+
+        notes.extend(
+            cls._format_data_b_cost_note("新增成本行", row, use_rate=use_rate, use_item=use_item)
+            for row in cls._remaining_rows_in_order(excel_rows, excel_remaining)
         )
-        if sap_bag != excel_bag:
-            return f"成本表不同 SAP={cls._fmt_bag(sap_bag)} Excel={cls._fmt_bag(excel_bag)}"
-        return ""
+        notes.extend(
+            cls._format_data_b_cost_note("删除成本行", row, use_rate=use_rate, use_item=use_item)
+            for row in cls._remaining_rows_in_order(sap_rows, sap_remaining)
+        )
+        return notes
+
+    @staticmethod
+    def _remaining_rows_in_order(
+        rows: list[tuple[str, str, str]],
+        remaining: Counter,
+    ) -> list[tuple[str, str, str]]:
+        """按原始行序展开 Counter 剩余项，避免日志顺序被字典/排序规则打乱。"""
+        counts = Counter(remaining)
+        ordered: list[tuple[str, str, str]] = []
+        for row in rows:
+            if counts[row] > 0:
+                ordered.append(row)
+                counts[row] -= 1
+        return ordered
+
+    @classmethod
+    def _format_data_b_cost_note(
+        cls,
+        action: str,
+        row: tuple[str, str, str],
+        *,
+        use_rate: bool,
+        use_item: bool,
+        old_amount: str | None = None,
+    ) -> str:
+        rate, item, amount = row
+        parts = [action]
+        if use_item:
+            parts.append(f"item {item or '(空)'}")
+        if use_rate:
+            parts.append(f"费率中心 {rate or '(空)'}")
+        amount_text = f"金额 {old_amount}→{amount}" if old_amount is not None else f"金额 {amount}"
+        parts.append(amount_text)
+        return "，".join(parts)
 
     @classmethod
     def _data_b_snapshot_note(

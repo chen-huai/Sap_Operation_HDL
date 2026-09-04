@@ -355,7 +355,7 @@ class SapOrderMixin:
         优先级（高→低）：
             - success=False → 红色「失败」；
             - 消息含"读取失败"（控件读不到，疑似控件 ID bug）→ 红色「异常」；
-            - warning 标记 或 消息含"已跳过"（如 SAP 无对应 item、SAP 有/Excel 无）→ 橙色「警告」；
+            - warning 标记 → 橙色「警告」；
             - 其余 → 默认色「成功」。
         """
         message = step_result.message or ''
@@ -367,7 +367,7 @@ class SapOrderMixin:
             self.textBrowser.append(
                 "<font color='red'>%s 异常: %s</font>" % (step_name, message)
             )
-        elif step_result.warning or '已跳过' in message:
+        elif step_result.warning:
             self.textBrowser.append(
                 "<font color='orange'>%s 警告: %s</font>" % (step_name, message)
             )
@@ -476,8 +476,9 @@ class SapOrderMixin:
                 data_b_entries, order, clear_diffs, item_no_map=item_no_map,
             )
             data_b_changed = clear_result.changed
-            self._append_remark(remarks, "Data B 清空", clear_result, clear_diffs)
-            _report_step('Data B 清空', clear_result)
+            clear_label = "Data B 清空" if data_b_changed else "Data B 检查"
+            self._append_remark(remarks, clear_label, clear_result, clear_diffs)
+            _report_step(clear_label, clear_result)
             if not clear_result.success:
                 self._write_edit_log(
                     log_file, log_data_path, index, order_no, remarks, sap_amount_vat
@@ -1076,6 +1077,7 @@ class SapOrderMixin:
             self.textBrowser.append("订单数据已处理完成")
             self.textBrowser.append("log数据:%s" % log_data_path)
             self.textBrowser.append('----------------------------------')
+            self._open_log_after_sap_run(log_data_path)
             QMessageBox.information(self, "提示信息", "订单数据已处理完成", QMessageBox.Yes)
         except Exception as msg:
             self.textBrowser.append('订单数据处理失败:%s' % msg)
@@ -1084,6 +1086,21 @@ class SapOrderMixin:
         finally:
             if sap_session is not None:
                 sap_session.close()
+
+    def _open_log_after_sap_run(self, log_data_path):
+        """SAP 创建/编辑批量流程结束后打开本次 log 文件；失败只提示，不影响流程收尾。"""
+        try:
+            if log_data_path and os.path.exists(log_data_path):
+                os.startfile(log_data_path)
+            else:
+                self.textBrowser.append(
+                    "<font color='orange'>log文件不存在，无法自动打开: %s</font>" % log_data_path
+                )
+        except Exception as exc:
+            self.textBrowser.append(
+                "<font color='orange'>log文件自动打开失败: %s</font>" % exc
+            )
+        QApplication.processEvents()
 
     def orderUnlockOrLock(self, flag):
         """批量锁定/解锁订单。
