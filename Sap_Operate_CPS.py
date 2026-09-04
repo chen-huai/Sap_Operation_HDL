@@ -60,6 +60,7 @@ class MyMainWindow(MainWindowUiMixin, ConfigMixin, SapOrderMixin, OdmInvoiceMixi
     def __init__(self, parent=None):
         super(MyMainWindow, self).__init__(parent)
         self.setupUi(self)
+        self.setWindowTitle("Sap_Operate_CPS")
 
         self.theme_manager = ThemeManager(QApplication.instance())
         self.init_theme_action()
@@ -164,6 +165,7 @@ if __name__ == "__main__":
     # ================================================================
     QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling)
     app = QApplication(sys.argv)
+    app.setApplicationName("Sap_Operate_CPS")
     myWin = MyMainWindow()
     myTable = MyTableWindow()
     builtins.myWin = myWin

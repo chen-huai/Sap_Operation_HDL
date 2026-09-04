@@ -5,9 +5,9 @@
 """
 
 # 应用配置
-SOFTWARE_ID: str = "sap_operation_HDL_tool"  # 软件唯一标识，用于多软件状态隔离
-APP_NAME: str = "Sap_Operate_HDL"
-APP_EXECUTABLE: str = "Sap_Operate_HDL.exe"
+SOFTWARE_ID: str = "sap_operation_CPS_tool"  # 软件唯一标识，用于多软件状态隔离
+APP_NAME: str = "Sap_Operate_CPS"
+APP_EXECUTABLE: str = "Sap_Operate_CPS.exe"
 
 # GitHub仓库配置
 GITHUB_OWNER: str = "chen-huai"
