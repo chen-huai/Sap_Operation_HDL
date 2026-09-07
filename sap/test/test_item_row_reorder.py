@@ -374,6 +374,19 @@ class CreateItemsReorderTest(unittest.TestCase):
         self.assertEqual(_condition_of(raw, "1000"), "100.00")
         self.assertEqual(_condition_of(raw, "3000"), "300.00")
 
+    def test_single_item_amount_uses_overview_net_value(self):
+        # 单 item 也走全量重读：旧实现此路径直接返回条件页原始文本，语义与多 item 不一致。
+        _tx, base, raw = _make([])
+        order = _order(
+            OrderItemData(item="1000", material_code="M1", revenue=680.0, quantity="1", unit="pu"),
+        )
+
+        result = base.add_items(order, RevenueData(revenue=680.0, revenue_cny=680.0))
+
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(result.sap_amount_vat, "680.00")
+        self.assertEqual(_condition_of(raw, "1000"), "680.00")
+
 
 class PlanCostLocateTest(unittest.TestCase):
     """计划成本：按 item 号实时定位物理行，而非调用方的列表索引。"""

@@ -91,6 +91,48 @@ class SapOrderMixin:
             return False
         return ts.date() < pd.Timestamp.today().date()
 
+    @staticmethod
+    def _to_amount(value) -> float:
+        """金额文本 → float：去千分位，空值/非法值统一回退 0.0。
+
+        SAP 回读与 Excel 两侧的金额都走这里，保证比对口径一致（SAP 侧带千分位如 `1,190.00`）。
+        """
+        try:
+            return float(str(value).replace(',', '')) if value else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    @classmethod
+    def _amount_mismatch_message(cls, label, expected, actual, *, expected_name, actual_name):
+        """两个金额不等（容差 0.01）时返回提示文本，相等或 expected<=0 时返回空串。
+
+        容差 0.01 容忍浮点误差；expected<=0 时不比较，避免 Excel 空值把每单都报成不一致。
+        """
+        expected_value, actual_value = cls._to_amount(expected), cls._to_amount(actual)
+        if expected_value <= 0:
+            return ''
+        diff = round(actual_value - expected_value, 2)
+        if abs(diff) < 0.01:
+            return ''
+        return (
+            f"{label}: {expected_name}={format(expected_value, ',.2f')} "
+            f"{actual_name}={format(actual_value, ',.2f')} 差额={format(diff, ',.2f')}"
+        )
+
+    @classmethod
+    def _excel_items_total_mismatch(cls, items_revenue_total, excel_amount_untaxed):
+        """写入 SAP 前：Σ(item 表 Item price) vs 抬头 Untaxed amount，不一致时返回告警文本。
+
+        业务原则：SAP 中一律是对应币种的**未税**数据，故 item 表单价也必须是未税价。
+        不一致最常见的成因是 item 表误填含税价（Σ/未税 = 1.06 即增值税率）。
+        """
+        message = cls._amount_mismatch_message(
+            "Excel 表内金额不一致(item 表可能填了含税价)",
+            excel_amount_untaxed, items_revenue_total,
+            expected_name="未税金额", actual_name="Items 加和",
+        )
+        return message
+
     def _filter_related_rows(self, dataframe, order_row):
         """按 Combine Id 严格筛选当前订单对应的明细行；调用前需确保 Combine Id 存在。"""
         if dataframe.empty:
@@ -546,20 +588,11 @@ class SapOrderMixin:
             self.textBrowser.append("<font color='red'>%s</font>" % incomplete_msg)
 
         # 未税金额一致性校验（与创建分支同口径）：SAP 加和为未税净值，对 Excel Untaxed amount。
-        try:
-            sap_amount_value = float(str(sap_amount_vat).replace(',', '')) if sap_amount_vat else 0.0
-        except (TypeError, ValueError):
-            sap_amount_value = 0.0
-        try:
-            excel_amount_value = float(str(excel_amount_untaxed).replace(',', '')) if excel_amount_untaxed else 0.0
-        except (TypeError, ValueError):
-            excel_amount_value = 0.0
-        amount_diff = round(sap_amount_value - excel_amount_value, 2)
-        if excel_amount_value > 0 and abs(amount_diff) >= 0.01:
-            diff_msg = (
-                f"未税金额不一致: Excel={format(excel_amount_value, ',.2f')} "
-                f"SAP={format(sap_amount_value, ',.2f')} 差额={format(amount_diff, ',.2f')}"
-            )
+        diff_msg = self._amount_mismatch_message(
+            "未税金额不一致", excel_amount_untaxed, sap_amount_vat,
+            expected_name="Excel", actual_name="SAP",
+        )
+        if diff_msg:
             remarks.append(diff_msg)
             self.textBrowser.append("<font color='red'>%s</font>" % diff_msg)
 
@@ -843,9 +876,21 @@ class SapOrderMixin:
                 self.textBrowser.append("Sales: %s" % sales_name)
                 self.textBrowser.append("未税金额(Excel): %s" % excel_amount_untaxed)
                 self.textBrowser.append("Items 加和金额: %s" % format(items_revenue_total, ',.2f'))
-                QApplication.processEvents()
 
                 remarks = []
+
+                # 写入 SAP 前的 Excel 表内一致性校验（业务原则：SAP 侧一律是对应币种的未税值，
+                # 故 item 表 'Item price' 也必须是未税价）。Σ(Item price) ≠ 抬头 'Untaxed amount'
+                # 通常意味着 item 表填了含税价（实测 212/200 = 1.06 即增值税率）。
+                # 用户确认的处置：红字告警 + 记 log，但不拦截——是否作废由人工判断。
+                excel_items_diff = self._excel_items_total_mismatch(
+                    items_revenue_total, excel_amount_untaxed
+                )
+                if excel_items_diff:
+                    remarks.append(excel_items_diff)
+                    self.textBrowser.append("<font color='red'>%s</font>" % excel_items_diff)
+                QApplication.processEvents()
+
                 # 业务流程：VA01(可选) -> Save VA01 -> 打开 VA02 -> Add Item
                 # -> Plan Cost(可选) -> Save VA02 -> 打开 VA02 -> Data B(可选) -> Save VA02。
                 # Save 复选框控制常规保存；但本次新增 item 后再做 Data B 时，会先强制保存 item，
@@ -1035,25 +1080,14 @@ class SapOrderMixin:
                     if not order_no:
                         order_no = self._extract_order_no(sap_session)
 
-                # SAP 加和金额为未税净值，理论上应等于 Excel "Untaxed amount"。
-                # 容差 0.01 容忍浮点误差；只有在 Excel 未税金额可用时才比较，避免空值误判。
-                try:
-                    sap_amount_value = float(str(sap_amount_vat).replace(',', '')) if sap_amount_vat else 0.0
-                except (TypeError, ValueError):
-                    sap_amount_value = 0.0
-                try:
-                    excel_amount_value = float(str(excel_amount_untaxed).replace(',', '')) if excel_amount_untaxed else 0.0
-                except (TypeError, ValueError):
-                    excel_amount_value = 0.0
-
-                amount_diff = round(sap_amount_value - excel_amount_value, 2)
-                amount_mismatch = excel_amount_value > 0 and abs(amount_diff) >= 0.01
+                # SAP 加和金额为未税净值（全量重读 Σ VBAP-NETWR），理论上应等于 Excel
+                # "Untaxed amount"。与编辑分支共用 _amount_mismatch_message，口径完全一致。
+                diff_msg = self._amount_mismatch_message(
+                    "未税金额不一致", excel_amount_untaxed, sap_amount_vat,
+                    expected_name="Excel", actual_name="SAP",
+                )
+                amount_mismatch = bool(diff_msg)
                 if amount_mismatch:
-                    diff_msg = (
-                        f"未税金额不一致: Excel={format(excel_amount_value, ',.2f')} "
-                        f"SAP={format(sap_amount_value, ',.2f')} "
-                        f"差额={format(amount_diff, ',.2f')}"
-                    )
                     remarks.append(diff_msg)
 
                 log_file.loc[index, '操作类型'] = 'Create'
