@@ -288,13 +288,16 @@ class EditItemsReorderTest(unittest.TestCase):
         self.assertEqual(_condition_of(raw, "4000"), "444.00")
         self.assertEqual(_condition_of(raw, "5000"), "500.00")
 
-    def test_auto_numbered_insert_located_by_new_number(self):
-        # ODM item 号已被占用 → 不写 POSNR、由 SAP 自动分配；按"写入前号集合"的差集定位。
+    def test_existing_item_no_with_other_material_never_inserts(self):
+        """业务原则：item 号已存在但物料不同 → 跳过，概览行数不变（不再自动改号新增）。
+
+        旧实现在此走"不写 POSNR、由 SAP 自动分配"的新增分支，于是每运行一次就多一行
+        同物料 item，越跑越多（订单 7482680365 实测：2000/3000 被反复新增）。
+        """
         raw_items = [_Item("1000", "M1", "100.00"), _Item("2000", "M2", "200.00")]
         tx, _base, raw = _make(raw_items)
         order = _order(
             OrderItemData(item="1000", material_code="M1", revenue=100.0),
-            # item 号 1000 已存在但物料不同 → 走新增，SAP 自动改号。
             OrderItemData(item="1000", material_code="MX", revenue=777.0),
         )
         diffs: list[str] = []
@@ -302,10 +305,12 @@ class EditItemsReorderTest(unittest.TestCase):
         result = tx.edit_items(order, diffs)
 
         self.assertTrue(result.success, result.message)
-        new_item = next(item for item in raw.items if item.material == "MX")
-        self.assertEqual(new_item.condition, "777.00")        # 金额落在新行
-        self.assertNotIn(new_item.no, {"1000", "2000"})       # 号由 SAP 重新分配
+        self.assertTrue(result.warning)
+        self.assertEqual(raw.item_nos(), ["1000", "2000"])      # 一行都没加
+        self.assertNotIn("MX", [item.material for item in raw.items])
+        self.assertEqual(_condition_of(raw, "1000"), "100.00")  # 命中项金额已一致，未重写
         self.assertEqual(_condition_of(raw, "2000"), "200.00")  # 邻行未被波及
+        self.assertTrue(any("item 已存在但 MC 不同" in d for d in diffs), diffs)
 
     def test_unlocatable_new_item_skips_write_and_warns(self):
         # 新增行被 SAP 丢弃（模拟：写入后行消失）→ 定位不到，宁可不写也不写到别的 item 上。
@@ -368,6 +373,19 @@ class CreateItemsReorderTest(unittest.TestCase):
         self.assertEqual(result.sap_amount_vat, "400.00")
         self.assertEqual(_condition_of(raw, "1000"), "100.00")
         self.assertEqual(_condition_of(raw, "3000"), "300.00")
+
+    def test_single_item_amount_uses_overview_net_value(self):
+        # 单 item 也走全量重读：旧实现此路径直接返回条件页原始文本，语义与多 item 不一致。
+        _tx, base, raw = _make([])
+        order = _order(
+            OrderItemData(item="1000", material_code="M1", revenue=680.0, quantity="1", unit="pu"),
+        )
+
+        result = base.add_items(order, RevenueData(revenue=680.0, revenue_cny=680.0))
+
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(result.sap_amount_vat, "680.00")
+        self.assertEqual(_condition_of(raw, "1000"), "680.00")
 
 
 class PlanCostLocateTest(unittest.TestCase):

@@ -422,10 +422,18 @@ class OrderTransaction:
         与物理行顺序不再等价（Excel 侧 `_sort_items_for_sap` 的预排序只对"全部 item 号
         都是数字且不与已有号冲突"成立，SAP 自动分配号的行不在其保证范围内）。
         故回车后立刻重读概览、按 (item 号, 物料) 解析每条的真实行。
+
+        Returns:
+            str: 全部 item 写完后**全量重读概览**的净值加和(Σ VBAP-NETWR)，与
+                `fill_order_value` / 编辑路径 `edit_items` 完全同源（业务原则：SAP 侧
+                一律是对应币种的未税值）。不用"边写边累加条件价 KBETR"的旧口径：
+                  ① KBETR 是刚写进去的 Excel 值的回声，拿它比对 Excel 等于自证，
+                     发现不了 SAP 侧的真实偏差（这是改口径的主因）；
+                  ② 先前 item 的净值会被后续写入触发的 SAP 重排/重算改变，累加值不回头更新；
+                  ③ 定位失败被跳过的 item 不计入，加和静默偏小；
+                  ④ 单 item 分支旧实现直接返回条件页原始文本，与多 item 语义不一致。
         """
         items = self._resolve_order_items(order)
-        sap_amount_total = 0.0
-        sap_amount_text = ""
 
         for row, item in enumerate(items):
             self._write_item_row(row, item)
@@ -457,17 +465,19 @@ class OrderTransaction:
                 continue
             self.session.focus(self._material_id(row), 10)
             self.session.send_vkey(2)
-            amount_text = self._write_item_condition(format(item.revenue, ".2f"))
-            sap_amount_text = amount_text
-            sap_amount_total += self._parse_amount(amount_text)
+            self._write_item_condition(format(item.revenue, ".2f"))
             # condition 写完仍处于 item 详情视图，借机写入 Long Text 后再返回 item 列表。
             if item.long_text:
                 self._write_item_long_text(item.long_text, result)
             self.session.press("wnd[0]/tbar[0]/btn[3]")
 
-        if len(items) > 1:
-            return self._format_amount(sap_amount_total)
-        return sap_amount_text
+        # 全部写完后回概览页重读一次全量净值——权威口径，理由见本方法 docstring。
+        self._ensure_item_overview()
+        net_total, truncated = self._sum_item_net_values()
+        if truncated:
+            result.warning = True
+            result.append_message("item 行数超过扫描上限，未税加和可能少算，请人工核对")
+        return self._format_amount(net_total)
 
     def _write_item_row(self, row: int, item: OrderItemData, *, write_item_no: bool = True) -> None:
         """Write one item row.
