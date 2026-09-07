@@ -216,8 +216,9 @@ class EditItemsMatchTest(unittest.TestCase):
         # 金额无变化不输出，仅文本旧→新。
         self.assertEqual(diffs, ["item 10 物料 T75-405-00 文本 旧描述→新描述"])
 
-    def test_different_material_adds_new_row(self):
-        # item 同号但物料不同 → 新增一条；item 号已存在故 SAP 自动分配（不写 POSNR）。
+    def test_existing_item_no_with_different_material_is_skipped(self):
+        # 业务原则：item 号已存在但物料不同 → 一个字都不写，告警跳过。
+        # 物料在 SAP 落盘后不可改，旧实现在此新增一条，导致每轮运行 item 无限增长。
         preset = {**_existing_row("10", "T75-405-00", 0), **_price_rows(1)}
         preset[CONDITION_ID] = _Element("0.00")
         tx, raw = _make_tx(preset)
@@ -227,14 +228,116 @@ class EditItemsMatchTest(unittest.TestCase):
         result = tx.edit_items(order, diffs)
 
         self.assertTrue(result.success, result.message)
-        # 新行落在 next_row=1：物料写入，POSNR 不写（让 SAP 自动分配）。
-        self.assertEqual(raw.findById(OrderTransaction._material_id(1)).text, "T20-430-00")
+        self.assertTrue(result.warning)
+        # 未新增任何行：next_row=1 的物料/POSNR 与创建侧条件行都没被触碰。
+        self.assertEqual(raw.findById(OrderTransaction._material_id(1)).text, "")
         self.assertEqual(raw.findById(OrderTransaction._item_id(1)).text, "")
+        self.assertEqual(raw.findById(NEW_CONDITION_ID).text, "")
+        # 也没进详情改命中项的金额（原行只是被占位，不是命中）。
+        self.assertEqual(raw.findById(CONDITION_ID).text, "0.00")
+        # 只报一条跳过原因；该行已占位，不再重复报"SAP 有、Excel 无"。
+        self.assertEqual(diffs, [
+            "item 10：SAP 物料 T75-405-00 ≠ Excel 物料 T20-430-00，"
+            "item 已存在但 MC 不同，已跳过(MC 在 SAP 不可改，请核对表格)"
+        ])
+
+    def test_new_item_no_adds_row_with_excel_item_no(self):
+        # item 号在 SAP 中不存在 → 才允许新增，且 POSNR 必须与 Excel 一致。
+        preset = {**_existing_row("10", "T75-405-00", 0), **_price_rows(1)}
+        preset[CONDITION_ID] = _Element("0.00")
+        tx, raw = _make_tx(preset)
+        order = _order(OrderItemData(item="20", material_code="T20-430-00", revenue=3000.0))
+        diffs: list[str] = []
+
+        result = tx.edit_items(order, diffs)
+
+        self.assertTrue(result.success, result.message)
+        # 新行落在 next_row=1：POSNR 与物料都按 Excel 写入。
+        self.assertEqual(raw.findById(OrderTransaction._item_id(1)).text, "20")
+        self.assertEqual(raw.findById(OrderTransaction._material_id(1)).text, "T20-430-00")
         # 新增金额走创建侧条件行 [3,5]，而非编辑行 [3,1]。
         self.assertEqual(raw.findById(NEW_CONDITION_ID).text, "3000.00")
-        # 新增一行 + 原 item 10/T75 物料已变成孤儿行（SAP 有 ODM 无）一行。
-        self.assertIn("item 10 物料 T20-430-00 新增金额 3000.00", diffs)
+        self.assertIn("item 20 物料 T20-430-00 新增金额 3000.00", diffs)
         self.assertIn("item 10 物料 T75-405-00 金额 0.00：SAP 有、Excel 无，已跳过", diffs)
+
+    def test_mc_mismatch_never_grows_items(self):
+        """故障复现（订单 7482680365 / Request 70.452.26.17972.01，2026-09-07）。
+
+        SAP：1000/T75-452-00、2000/T20-452-T5、3000/T20-452-T5；
+        Excel：1000、2000、3000 的 MC 全是 T75-452-00。
+        期望：只更新 1000 的金额，2000/3000 告警跳过，概览不新增任何行。
+        """
+        preset = {
+            **_existing_row("1000", "T75-452-00", 0),
+            **_existing_row("2000", "T20-452-T5", 1),
+            **_existing_row("3000", "T20-452-T5", 2),
+            **_price_rows(1),
+        }
+        preset[CONDITION_ID] = _Element("100.00")
+        tx, raw = _make_tx(preset)
+        order = _order(
+            OrderItemData(item="1000", material_code="T75-452-00", revenue=360.0),
+            OrderItemData(item="2000", material_code="T75-452-00", revenue=140.0),
+            OrderItemData(item="3000", material_code="T75-452-00", revenue=660.0),
+        )
+        diffs: list[str] = []
+
+        result = tx.edit_items(order, diffs)
+
+        self.assertTrue(result.success, result.message)
+        self.assertTrue(result.warning)
+        # 第 4 行（next_row=3）保持空：一条都没新增，这是本次修复的核心断言。
+        self.assertEqual(raw.findById(OrderTransaction._item_id(3)).text, "")
+        self.assertEqual(raw.findById(OrderTransaction._material_id(3)).text, "")
+        # 命中的 1000 仍正常更新金额。
+        self.assertEqual(raw.findById(CONDITION_ID).text, "360.00")
+        self.assertEqual(diffs, [
+            "item 2000：SAP 物料 T20-452-T5 ≠ Excel 物料 T75-452-00，"
+            "item 已存在但 MC 不同，已跳过(MC 在 SAP 不可改，请核对表格)",
+            "item 3000：SAP 物料 T20-452-T5 ≠ Excel 物料 T75-452-00，"
+            "item 已存在但 MC 不同，已跳过(MC 在 SAP 不可改，请核对表格)",
+            "item 1000 物料 T75-452-00 金额 100.00→360.00",
+        ])
+
+    def test_double_key_match_wins_over_same_item_no(self):
+        # Excel 同号两条物料，其中一条与 SAP 全等：双键命中优先占行，不受 Excel 行序影响。
+        preset = {**_existing_row("10", "T75-405-00", 0), **_price_rows(1)}
+        preset[CONDITION_ID] = _Element("100.00")
+        tx, raw = _make_tx(preset)
+        order = _order(
+            OrderItemData(item="10", material_code="T20-430-00", revenue=3000.0),  # 先出现，须跳过
+            OrderItemData(item="10", material_code="T75-405-00", revenue=680.0),   # 后出现，须命中
+        )
+        diffs: list[str] = []
+
+        result = tx.edit_items(order, diffs)
+
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(raw.findById(CONDITION_ID).text, "680.00")  # 全等那条完成更新
+        self.assertEqual(raw.findById(OrderTransaction._material_id(1)).text, "")  # 未新增
+        self.assertIn(
+            "item 10：SAP 物料 T75-405-00 ≠ Excel 物料 T20-430-00，"
+            "item 已存在但 MC 不同，已跳过(MC 在 SAP 不可改，请核对表格)",
+            diffs,
+        )
+        self.assertIn("item 10 物料 T75-405-00 金额 100.00→680.00", diffs)
+
+    def test_leading_zero_item_no_counts_as_existing(self):
+        # POSNR 定长回读带前导零（002000）时，仍须判定为"号已存在"→ 跳过，不能新增。
+        preset = {**_existing_row("002000", "T20-452-T5", 0), **_price_rows(1)}
+        tx, raw = _make_tx(preset)
+        order = _order(OrderItemData(item="2000", material_code="T75-452-00", revenue=140.0))
+        diffs: list[str] = []
+
+        result = tx.edit_items(order, diffs)
+
+        self.assertTrue(result.success, result.message)
+        self.assertTrue(result.warning)
+        self.assertEqual(raw.findById(OrderTransaction._material_id(1)).text, "")  # 未新增
+        self.assertEqual(diffs, [
+            "item 2000：SAP 物料 T20-452-T5 ≠ Excel 物料 T75-452-00，"
+            "item 已存在但 MC 不同，已跳过(MC 在 SAP 不可改，请核对表格)"
+        ])
 
     def test_sap_extra_row_warns(self):
         # SAP 有 item 20 但 ODM 表无 → 提示并记 log，不删不改。

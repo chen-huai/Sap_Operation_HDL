@@ -755,9 +755,12 @@ class OrderEditTransaction:
     ) -> SapResult:
         """按 item+物料 双键对比更新 item。
 
-        规则（见 .claude/plan/va02_edit_items_match.md）：
+        规则（见 .claude/plan/va02_edit_items_match.md、
+        .claude/plan/va02_edit_item_mc_mismatch_skip.md）：
             - item 与 物料 均一致 → 仅更新金额（绝不改写物料，已落盘行物料只读会报错）；
-            - item 或 物料 有一个不同 → 新增一条；
+            - **item 号已存在但物料不同 → 告警跳过，不新增也不编辑**（业务原则：物料在
+              SAP 落盘后不可修改，另开一条会让同一 item 号每轮被重复新增）；
+            - item 号在 SAP 中不存在 → 新增一条；
             - SAP 有、ODM 表无 → 提示并记 log，不删不改。
 
         Args:
@@ -779,20 +782,45 @@ class OrderEditTransaction:
 
             existing = self._base.read_item_rows()  # [(物理 row, item_no, material, 金额)]
 
-            # 分两批处理，规避"新增回车后 SAP 按 POSNR 重排导致行号失效"：
+            # 分批处理，规避"新增回车后 SAP 按 POSNR 重排导致行号失效"：
             #   ① 命中项：改金额/长文本，POSNR 不变、不触发重排，行号稳定；
             #   ② 新增项：每加一条 SAP 都会重排，故回车后必须重读概览重新定位当前行，
-            #      绝不能沿用写入时的追加行号（否则金额/文本写到别的 item 上）。
+            #      绝不能沿用写入时的追加行号（否则金额/文本写到别的 item 上）；
+            #   ③ 跳过项：item 号已存在但物料不同，只记 log，一个字都不写。
             matched: list[tuple[int, "OrderItemData"]] = []
             new_items: list["OrderItemData"] = []
+            skipped: list[tuple["OrderItemData", str]] = []  # (item, SAP 侧物料)
             matched_rows: set[int] = set()
+            # 双键匹配先跑满一轮再分类剩余项：让"号+物料全等"的 item 优先占住它的行，
+            # 不受 Excel 行序影响（同号不同物料的行若先占位，会把真正命中的行挤成跳过项）。
+            pending: list["OrderItemData"] = []
             for item in items:
                 row = self._match_item_row(existing, item, matched_rows)
                 if row is not None:
                     matched_rows.add(row)
                     matched.append((row, item))
                 else:
+                    pending.append(item)
+            for item in pending:
+                located = self._find_existing_item_no_row(existing, item)
+                if located is None:
                     new_items.append(item)
+                    continue
+                # 业务原则：item 号已存在即认定为 SAP 中的那条数据，物料不同也不许另开一条
+                # （物料在 SAP 不可改）。旧实现落入新增分支，导致每运行一次就追加一条
+                # 同物料新行，item 无限增长（订单 7482680365 实测）。
+                no_row, sap_material = located
+                matched_rows.add(no_row)  # 占住该行，避免再被"SAP 有、Excel 无"重复报一条
+                skipped.append((item, sap_material))
+
+            # 跳过项先报：这是需要人工回表核对的数据错位，摘要排在最前面最醒目。
+            for item, sap_material in skipped:
+                result.warning = True
+                diffs.append(
+                    f"item {self._norm(item.item)}：SAP 物料 {sap_material or '(空)'}"
+                    f" ≠ Excel 物料 {self._norm(item.material_code)}，"
+                    "item 已存在但 MC 不同，已跳过(MC 在 SAP 不可改，请核对表格)"
+                )
 
             # 批次一：命中项（进详情逐字段比对金额/长文本，仅差异才写，绝不碰只读物料）。
             # 行号取自本批开始前的快照，而每次进详情/返回都要按键，故进详情前复核一次行身份：
@@ -818,7 +846,9 @@ class OrderEditTransaction:
                 # 后者是回车重排后识别新增行的唯一可靠判据（号只增不改）。
                 before = self._base.read_item_rows()
                 before_nos = {item_no for _, item_no, _, _ in before if item_no}
-                # item 号已存在则让 SAP 自动分配（write_item_no=False），避免重号。
+                # 新增项的 item 号恒与 Excel 一致：号已存在的 item 在上面分类阶段就被判为
+                # 跳过项，走不到这里，故 write_item_no 实际恒为 True。保留该判定仅作防御
+                # （SAP 在本方法执行期间被他人加了同号 item 时退化为自动分配，避免重号报错）。
                 write_item_no = not (self._norm(item.item) and self._norm(item.item) in before_nos)
                 self._base._write_item_row(len(before), item, write_item_no=write_item_no)
                 # 回车确认 → SAP 按 POSNR 升序重排 → 立刻重新确认排序再写后续信息。
@@ -884,6 +914,24 @@ class OrderEditTransaction:
                 continue
             if self._norm(item_no) == target_item and self._norm(material) == target_material:
                 return row
+        return None
+
+    def _find_existing_item_no_row(
+        self, existing: list[tuple[int, str, str, str]], item: OrderItemData
+    ) -> tuple[int, str] | None:
+        """按 item 号（**不比物料**）定位现有行，返回 (物理 row, SAP 侧物料)；找不到返回 None。
+
+        供"item 号已存在但物料不同"的原则判定使用：物料在 SAP 落盘后不可修改，这类 item
+        既改不了也不许另开一条，只能跳过。不排除已被双键命中的行——号存在就是号存在，
+        Excel 里同号多物料时全部按跳过处理，绝不退化成新增。
+        比对走 _norm_no 去前导零口径，规避 POSNR 定长回读带零（`002000`）导致的漏判。
+        """
+        target_no = self._norm_no(item.item)
+        if not target_no:
+            return None
+        for row, item_no, material, _amount in existing:
+            if self._norm_no(item_no) == target_no:
+                return row, self._norm(material)
         return None
 
     def _relocate_new_item_row(
