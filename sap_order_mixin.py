@@ -269,7 +269,6 @@ class SapOrderMixin:
             sales_name=self._excel_str(order_row.get('Sales')),
             sales_group=self._resolve_sales_group(order_row),
             ecd=self._excel_date_dot(order_row.get('Ecd')),
-            order_cost_center=self._excel_str(order_row.get('Order Center')),
             items=items,
         )
 

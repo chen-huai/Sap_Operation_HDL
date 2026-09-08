@@ -79,8 +79,6 @@ class OrderData:
     sales_name: str = ""
     # 预计完成日期。
     ecd: str = ""
-    # order_center
-    order_cost_center: str = ""
     # Sales Group
     sales_group: str = ""
 
