@@ -299,8 +299,40 @@ class MainWindowUiMixin:
             import logging
             logging.warning(f"更新进度显示失败: {str(e)}")
     def closeEvent(self, event):
-        """应用退出时清理资源"""
+        """应用退出时清理资源；批量 SAP 任务进行中则改为请求中止，不直接销毁窗口。
+
+        SAP 批量流程跑在主线程（靠 processEvents 刷 UI），关窗事件会在循环中途被分发。
+        若此处直接 accept，窗口销毁后循环仍在跑：继续操作 SAP、继续 append 已销毁的
+        textBrowser（RuntimeError）、当前行 log 丢失。故运行中一律 event.ignore()，
+        由循环在下一个订单边界自行 break 收尾；收尾后标志复位，再点 ✕ 即正常退出。
+        """
         logger = logging.getLogger(__name__)
+
+        if self._is_sap_task_running():
+            if self._is_sap_cancel_requested():
+                # 已请求过中止：不重复弹窗，提示等待当前订单跑完即可。
+                QMessageBox.information(
+                    self, '提示信息',
+                    '已请求中止，正在等待当前订单完成，请稍候再关闭窗口。',
+                    QMessageBox.Yes,
+                )
+                event.ignore()
+                return
+
+            reply = QMessageBox.question(
+                self, '任务进行中',
+                'SAP 批量任务正在运行。\n\n'
+                '是否在当前订单完成后停止并保存 log？\n'
+                '（选 Yes 后请等待当前订单跑完，届时再关闭窗口；选 No 继续运行）',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                self._request_sap_cancel()
+                logger.info('用户请求中止 SAP 批量任务，等待当前订单完成')
+            event.ignore()
+            return
+
         try:
             # 清理自动更新器资源
             if hasattr(self, 'auto_updater') and self.auto_updater:

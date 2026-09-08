@@ -91,6 +91,54 @@ class SapOrderMixin:
             return False
         return ts.date() < pd.Timestamp.today().date()
 
+    # ===== 批量任务运行状态与中止请求 =====
+    # SAP 批量流程跑在主线程（靠 processEvents 刷 UI，无 QThread），故关窗事件会在循环
+    # 中途被分发。closeEvent 若直接 accept，窗口销毁后循环仍在跑，继续 append 已销毁的
+    # textBrowser 会崩溃且丢当前行 log。改为置中止标志、由循环在**订单边界**自行 break：
+    # SAP 侧不留半成品单，代价是关窗后需等当前订单跑完。
+
+    def _begin_sap_task(self):
+        """标记批量任务开始；同时清空上一轮可能残留的中止请求。"""
+        self._sap_task_running = True
+        self._sap_cancel_requested = False
+
+    def _end_sap_task(self):
+        """标记批量任务结束（须放在 finally，保证异常路径也复位）。"""
+        self._sap_task_running = False
+
+    def _is_sap_task_running(self):
+        """当前是否有批量任务在跑；未初始化时按"未运行"处理。"""
+        return getattr(self, '_sap_task_running', False)
+
+    def _request_sap_cancel(self):
+        """请求中止批量任务：只置标志，实际停止由循环在下一个订单边界执行。"""
+        self._sap_cancel_requested = True
+        self.textBrowser.append(
+            "<font color='orange'>已请求中止，将在当前订单完成后停止（SAP 侧不留半成品单）</font>"
+        )
+        QApplication.processEvents()
+
+    def _is_sap_cancel_requested(self):
+        """是否已请求中止；未初始化时按"未请求"处理。"""
+        return getattr(self, '_sap_cancel_requested', False)
+
+    @staticmethod
+    def _mark_unprocessed_rows_cancelled(log_file):
+        """中止时给"从未被处理过"的行写上中止原因，返回被标记的行数。
+
+        未处理 = Update Time 仍是初始值 '未开Order' 且 Remark 为空。中止是在订单边界
+        立刻 break 的，故"未处理"恰好等于"剩余"，无需按位置切片——避免对索引唯一性的
+        隐式依赖（`index.get_loc` 遇重复索引返回 slice/array 而非 int）。
+        Remark 非空的行是之前各分支主动跳过的（Combine Id/Invoice/CS 等），原因必须保留。
+        """
+        # 向量化判定 + 布尔掩码赋值：比逐行 .loc 更简，且不受索引重复影响
+        # （重复索引下 `.loc[idx, col]` 返回 Series，标量判断会抛 ValueError）。
+        not_run = log_file['Update Time'].fillna('').astype(str).str.strip() == '未开Order'
+        no_remark = log_file['Remark'].fillna('').astype(str).str.strip() == ''
+        untouched = not_run & no_remark
+        log_file.loc[untouched, 'Remark'] = '用户中止，未处理'
+        return int(untouched.sum())
+
     @staticmethod
     def _to_amount(value) -> float:
         """金额文本 → float：去千分位，空值/非法值统一回退 0.0。
@@ -676,7 +724,10 @@ class SapOrderMixin:
             return
 
         sap_session = None
+        cancelled = False
         try:
+            # 置运行标志：closeEvent 据此判断"任务进行中"，改为请求中止而非直接销毁窗口。
+            self._begin_sap_task()
             # 订单业务字段来自 Excel；事务流开关仍使用 GUI 复选框控制。
             flow_options = self.__class__.getGuiData(self)
             sheets = Get_Data().getExcelSheetsData(fileUrl)
@@ -721,402 +772,442 @@ class SapOrderMixin:
             sap_session = SapSession.connect()
 
             for index, order_row in order_df.iterrows():
-                # Combine Id 是关联 item / sub 的唯一键，缺失直接跳过当前订单。
-                if pd.isna(order_row.get('Combine Id')):
-                    log_file.loc[index, 'Remark'] = '缺失 Combine Id，无法关联 item/sub'
-                    log_file.to_excel(log_data_path, merge_cells=False, index=False)
-                    continue
-
-                # Invoice Number 有值 = 该单已开票，无论是否有 Order Number 都不新建/编辑，直接跳过。
-                # 放在 Combine Id 之后、GUI 回填/确认弹窗/对象构建之前，避免对已开票单做任何无谓动作。
-                invoice_number = self._excel_str(order_row.get('Invoice Number'))
-                if invoice_number:
-                    skip_msg = 'Invoice Number 已有值（%s），跳过不新建/编辑' % invoice_number
-                    log_file.loc[index, 'Remark'] = skip_msg
+                # 中止检查放在订单边界（早于任何 SAP 动作）：关窗请求中止后，当前订单
+                # 已跑完、下一单还没开始，SAP 侧不留半成品。剩余未处理行统一在 log 留痕，
+                # 与'执行异常'和'根本没轮到'区分开。
+                if self._is_sap_cancel_requested():
+                    self._mark_unprocessed_rows_cancelled(log_file)
                     log_file.to_excel(log_data_path, merge_cells=False, index=False)
                     self.textBrowser.append(
-                        "<font color='orange'>No.%s %s</font>" % (index + 1, skip_msg)
+                        "<font color='orange'>已中止：No.%s 及之后的订单未处理</font>" % (index + 1)
                     )
                     QApplication.processEvents()
-                    continue
+                    cancelled = True
+                    break
 
-                # Primary CS 必填：为空、或 CS 名未录入 config 人员名单（解析不出 CS 编号）时，
-                # SAP 伙伴页的"负责雇员"无从写入，创建/编辑都没有意义，直接跳过当前订单。
-                # 与 Invoice Number 同层拦截，故创建与编辑两条分支同时覆盖。
-                cs_name = self._excel_str(order_row.get('Primary CS'))
-                if not self._resolve_cs_code(order_row):
-                    cs_msg = (
-                        'Primary CS 为空（必填），跳过不新建/编辑' if not cs_name
-                        else 'Primary CS [%s] 不在配置文件中（取不到 CS 编号），跳过不新建/编辑' % cs_name
-                    )
-                    log_file.loc[index, 'Remark'] = cs_msg
-                    log_file.to_excel(log_data_path, merge_cells=False, index=False)
-                    self.textBrowser.append(
-                        "<font color='red'>No.%s %s</font>" % (index + 1, cs_msg)
-                    )
-                    QApplication.processEvents()
-                    continue
+                # per-row 异常隔离：单行任何未捕获异常只作废该行，不再终止整批。
+                # 出错行必须写 Update Time，否则它与'根本没轮到的行'在 log 里完全同形，
+                # 事后无法判断批量是从哪一行断的（本轮 NameError 事故的直接教训）。
+                try:
+                    # Combine Id 是关联 item / sub 的唯一键，缺失直接跳过当前订单。
+                    if pd.isna(order_row.get('Combine Id')):
+                        log_file.loc[index, 'Remark'] = '缺失 Combine Id，无法关联 item/sub'
+                        log_file.to_excel(log_data_path, merge_cells=False, index=False)
+                        continue
 
-                # 将当前订单关键字段回填到 GUI 控件，便于用户实时跟踪正在处理的订单。
-                self._apply_order_row_to_gui(order_row)
-
-                # everyCheck（checkBox_16）：每单开始前弹窗让用户确认是否处理；
-                # 选 No 跳过当前订单（log 标记），继续下一单。放在 GUI 回填后、对象构建前，
-                # 避免对跳过单做无谓的 DataFrame 转换和 SAP 校验。
-                if flow_options.get('everyCheck'):
-                    combine_id_preview = self._excel_str(order_row.get('Combine Id'))
-                    project_no_preview = self._excel_str(order_row.get('Request Number'))
-                    cs_preview = self._excel_str(order_row.get('Primary CS'))
-                    sales_preview = self._excel_str(order_row.get('Sales'))
-                    confirm_msg = (
-                        '是否处理 No.%s 订单？\n\n'
-                        'Combine Id: %s\n'
-                        'Request Number: %s\n'
-                        'Primary CS: %s\n'
-                        'Sales: %s\n\n'
-                        '点击 Yes 继续，No 跳过当前订单'
-                    ) % (index + 1, combine_id_preview, project_no_preview, cs_preview, sales_preview)
-                    reply = QMessageBox.question(
-                        self,
-                        '订单确认',
-                        confirm_msg,
-                        QMessageBox.Yes | QMessageBox.No,
-                        QMessageBox.Yes,
-                    )
-                    if reply != QMessageBox.Yes:
-                        log_file.loc[index, 'Remark'] = '用户选择跳过'
+                    # Invoice Number 有值 = 该单已开票，无论是否有 Order Number 都不新建/编辑，直接跳过。
+                    # 放在 Combine Id 之后、GUI 回填/确认弹窗/对象构建之前，避免对已开票单做任何无谓动作。
+                    invoice_number = self._excel_str(order_row.get('Invoice Number'))
+                    if invoice_number:
+                        skip_msg = 'Invoice Number 已有值（%s），跳过不新建/编辑' % invoice_number
+                        log_file.loc[index, 'Remark'] = skip_msg
                         log_file.to_excel(log_data_path, merge_cells=False, index=False)
                         self.textBrowser.append(
-                            "<font color='orange'>No.%s 用户选择跳过</font>" % (index + 1)
+                            "<font color='orange'>No.%s %s</font>" % (index + 1, skip_msg)
                         )
                         QApplication.processEvents()
                         continue
 
-                # 三张 DataFrame 已包含完整业务数据，这里只做对象适配和 SAP 写入。
-                order = self._build_order_from_dataframes(order_row, item_df)
-                revenue = self._build_revenue_from_order_row(order_row)
-                config = self._build_sap_config_from_order_row(order_row)
-                data_b_entries, plan_cost_entries_by_item = self._build_sub_entries_from_dataframe(order_row, sub_df)
-                service = OrderService(sap_session, config)
-
-                # ===== 编辑分流：Order Number 有值 = 订单已存在，跳过 VA01 创建，进 VA02 对比更新 =====
-                # Excel 会混排"有号=编辑 / 无号=创建"两类行；本分支只接管有号行，无号行落回下方原创建逻辑（行为不变）。
-                excel_order_no = self._excel_str(order_row.get('Order Number'))
-                if excel_order_no:
-                    self._edit_order_row(
-                        index, order_row, order, config,
-                        data_b_entries, plan_cost_entries_by_item,
-                        excel_order_no, flow_options, sap_session, log_file, log_data_path,
-                    )
-                    continue
-
-                # 按本次勾选的步骤分级校验：缺啥提示啥，支持只跑 Data B / Plan Cost 的分批验证场景。
-                need_va01_check = flow_options.get('va01Check')
-                need_va02_items_check = flow_options.get('va02Check')
-                need_data_b_check = flow_options.get('labCostCheck')
-                need_plan_cost_check = flow_options.get('planCostCheck')
-
-                # 订单号：优先 Excel；仅首行 + 单跑 Data B/Plan Cost 场景允许从 SAP 当前会话兜底读取
-                # （用户已手动打开 VA02 页面的情况）。后续行漏填则直接缺失报错，避免误写同一订单。
-                order_no = self._excel_str(order_row.get('Order Number'))
-                if (
-                    not order_no
-                    and index == 0
-                    and (need_data_b_check or need_plan_cost_check)
-                    and not need_va01_check
-                ):
-                    try:
-                        order_no = self._extract_order_no(sap_session)
-                    except Exception:
-                        order_no = ''
-
-                missing_fields = []
-                if need_va01_check and (not order.sap_no or not order.project_no):
-                    missing_fields.append('SAP No./Project No.')
-                if (need_va01_check or need_va02_items_check) and not order.items:
-                    missing_fields.append('items')
-                if (need_data_b_check or need_plan_cost_check) and not need_va01_check and not order_no:
-                    missing_fields.append('Order Number')
-
-                if missing_fields:
-                    missing_msg = '关键订单信息缺失（%s）' % '/'.join(missing_fields)
-                    log_file.loc[index, 'Remark'] = missing_msg
-                    log_file.to_excel(log_data_path, merge_cells=False, index=False)
-                    self.textBrowser.append(
-                        "<font color='red'>No.%s %s</font>" % (index + 1, missing_msg)
-                    )
-                    QApplication.processEvents()
-                    continue
-
-                if need_va01_check and self._is_date_before_today(order.ecd):
-                    ecd_msg = (
-                        "VA01创建失败：ECD %s 早于今天，不能早于订单创建日期"
-                        % order.ecd
-                    )
-                    log_file.loc[index, 'Remark'] = ecd_msg
-                    log_file.to_excel(log_data_path, merge_cells=False, index=False)
-                    self.textBrowser.append(
-                        "<font color='red'>No.%s %s</font>" % (index + 1, ecd_msg)
-                    )
-                    QApplication.processEvents()
-                    continue
-
-                # textBrowser 抬头：基础信息 + Excel 未税金额。
-                combine_id = self._excel_str(order_row.get('Combine Id'))
-                primary_cs = self._excel_str(order_row.get('Primary CS'))
-                sales_name = self._excel_str(order_row.get('Sales'))
-                excel_amount_untaxed = self._excel_str(order_row.get('Untaxed amount'))
-                items_revenue_total = sum(item.revenue for item in order.items)
-
-                self.textBrowser.append('==================== No.%s ====================' % (index + 1))
-                self.textBrowser.append("Combine Id: %s" % combine_id)
-                self.textBrowser.append("Request Number: %s" % order.project_no)
-                self.textBrowser.append("Primary CS: %s" % primary_cs)
-                self.textBrowser.append("Sales: %s" % sales_name)
-                self.textBrowser.append("未税金额(Excel): %s" % excel_amount_untaxed)
-                self.textBrowser.append("Items 加和金额: %s" % format(items_revenue_total, ',.2f'))
-
-                remarks = []
-
-                # 写入 SAP 前的 Excel 表内一致性校验（业务原则：SAP 侧一律是对应币种的未税值，
-                # 故 item 表 'Item price' 也必须是未税价）。Σ(Item price) ≠ 抬头 'Untaxed amount'
-                # 通常意味着 item 表填了含税价（实测 212/200 = 1.06 即增值税率）。
-                # 用户确认的处置：红字告警 + 记 log，但不拦截——是否作废由人工判断。
-                excel_items_diff = self._excel_items_total_mismatch(
-                    items_revenue_total, excel_amount_untaxed
-                )
-                if excel_items_diff:
-                    remarks.append(excel_items_diff)
-                    self.textBrowser.append("<font color='red'>%s</font>" % excel_items_diff)
-                QApplication.processEvents()
-
-                # 业务流程：VA01(可选) -> Save VA01 -> 打开 VA02 -> Add Item
-                # -> Plan Cost(可选) -> Save VA02 -> 打开 VA02 -> Data B(可选) -> Save VA02。
-                # Save 复选框控制常规保存；但本次新增 item 后再做 Data B 时，会先强制保存 item，
-                # 因为 Data B 依赖已落盘的 SAP item 号（1000/2000 等）。
-                sap_amount_vat = ''
-
-                _report_step = self._append_step_result
-
-                # Step 1: VA01 创建订单头
-                va01_done = False
-                if flow_options.get('va01Check'):
-                    # contactCheck（checkBox_19）：未勾选时 add_contact=False，
-                    # _fill_partners 内部跳过联系人写入；add_sales_partner 保持默认。
-                    partner_options = PartnerOptions(
-                        add_contact=bool(flow_options.get('contactCheck')),
-                    )
-                    create_result = service.create_order(
-                        order, revenue, partner_options=partner_options
-                    )
-                    remarks.append(f"VA01:{create_result.message}" if create_result.message else "VA01")
-                    order_no = create_result.order_no or order_no
-                    sap_amount_vat = create_result.sap_amount_vat or sap_amount_vat
-                    va01_done = create_result.success
-                    _report_step('VA01', create_result)
-
-                # Step 2: Save VA01 —— VA01 成功后，若有后续步骤或显式 saveCheck 都需要落盘
-                need_save_va01 = va01_done and (
-                    flow_options.get('saveCheck')
-                    or flow_options.get('va02Check')
-                    or flow_options.get('labCostCheck')
-                    or flow_options.get('planCostCheck')
-                )
-                if need_save_va01:
-                    save_va01_result = service.save('VA01')
-                    if save_va01_result.success:
-                        saved_order_no = self._extract_order_no(sap_session)
-                        if saved_order_no:
-                            order_no = saved_order_no
-                        else:
-                            # SAP 保存命令未抛错但读不到订单号（业务级静默失败）→ 视为 VA01 段失败，
-                            # 否则下游 VA02/Data B/Plan Cost 会用空/残留订单号继续执行。
-                            va01_done = False
-                            save_va01_result = SapResult.fail(
-                                "Save VA01 后未能读取到 Order No.", step="save"
-                            )
-                    else:
-                        # Save VA01 显式失败 → 视为 VA01 段失败，由 va01_blocked 守卫拦截后续步骤。
-                        va01_done = False
-                    remarks.append(
-                        f"Save VA01:{save_va01_result.message}" if save_va01_result.message else "Save VA01"
-                    )
-                    _report_step('Save VA01', save_va01_result)
-
-                # Step 3-6: VA02 段。只要勾选了 va02Check / labCostCheck / planCostCheck 任意一项，就需要进入 VA02。
-                # 当 VA01 被勾选但失败（va01_blocked=True）时短路 VA02 段，
-                # 避免 SAP VA02 窗体残留上一个订单号导致 Add Item / Data B / Plan Cost 误写入上一单。
-                has_va02_step = need_va02_items_check or need_data_b_check or need_plan_cost_check
-                va01_blocked = bool(flow_options.get('va01Check')) and not va01_done
-                need_va02 = not va01_blocked and has_va02_step
-
-                # VA01 失败导致 VA02 段被跳过时给出红字提示，避免用户以为流程在静默运行。
-                if va01_blocked and has_va02_step:
-                    self.textBrowser.append(
-                        "<font color='red'>VA01 失败，跳过当前订单的 VA02/Data B/Plan Cost 步骤</font>"
-                    )
-                    QApplication.processEvents()
-
-                if need_va02:
-                    open_result = service.open_order(order_no)
-                    # 直接从 VA02 开始时，Excel 'Order Number' 可能为空；优先取 open_result，再兜底从 SAP 提取。
-                    order_no = open_result.order_no or order_no or self._extract_order_no(sap_session)
-                    remarks.append(f"VA02:{open_result.message}" if open_result.message else "VA02")
-                    _report_step('Open VA02', open_result)
-                    if order_no:
-                        # 立即在显示框反馈识别到的订单号，便于直接开始 VA02 场景的用户确认。
-                        self.textBrowser.append("识别到 Order No.: %s" % order_no)
-                        QApplication.processEvents()
-
-                    if open_result.success:
-                        first_va02_changed = False
-                        item_added = False
-                        item_failed = False
-                        pre_data_b_save_ok = True
-                        # add item 仅在 va02Check 时进行；纯 Data B / Plan Cost 场景不重复加 item。
-                        if flow_options.get('va02Check'):
-                            item_result = service.add_items(order, revenue)
-                            order_no = item_result.order_no or order_no
-                            remarks.append(f"Item:{item_result.message}" if item_result.message else "Item")
-                            sap_amount_vat = item_result.sap_amount_vat or sap_amount_vat
-                            item_added = item_result.success
-                            item_failed = not item_result.success
-                            first_va02_changed = first_va02_changed or item_result.success
-                            _report_step('Add Item', item_result)
-
-                        if flow_options.get('planCostCheck') and not item_failed:
-                            # 按 item 号让 SAP 侧实时定位物理行（target_item）——SAP 写完 item
-                            # 回车后按 POSNR 重排，列表索引不等于物理行；索引仅作 Excel 未给
-                            # item 号（由 SAP 自动分配）时的兜底。
-                            # sub 表未提供 plan cost 数据的 item 直接跳过。
-                            for row, item in enumerate(order.items):
-                                plan_cost_entries = plan_cost_entries_by_item.get(item.item)
-                                if not plan_cost_entries:
-                                    continue
-                                plan_result = service.apply_plan_cost_entries(
-                                    plan_cost_entries, focus_row=row, target_item=item.item
-                                )
-                                first_va02_changed = first_va02_changed or plan_result.success
-                                remarks.append(
-                                    f"Plan Cost {item.item}:{plan_result.message}"
-                                    if plan_result.message
-                                    else f"Plan Cost {item.item}"
-                                )
-                                _report_step('Plan Cost %s' % item.item, plan_result)
-
-                        # 订单价值(AUFTRAGSWERT) 独立步骤：item 全部录入后，读 SAP 概览净值加和 × 汇率
-                        # 回填抬头字段。与 Data B(labCostCheck) 解耦，仅在本次成功新增 item 时执行；
-                        # 写入抬头后由下方 Save VA02 统一落盘（first_va02_changed 已因加 item 置真）。
-                        if flow_options.get('va02Check') and item_added:
-                            order_value_result = service.fill_order_value(order)
-                            first_va02_changed = first_va02_changed or order_value_result.success
-                            remarks.append(
-                                f"订单价值:{order_value_result.message}"
-                                if order_value_result.message else "订单价值"
-                            )
-                            _report_step('订单价值', order_value_result)
-
-                        need_data_b = flow_options.get('labCostCheck') and data_b_entries
-                        # Data B 的 item 依赖已保存的 SAP item 号（1000/2000 等）。
-                        # 如果本次新增了 item，即使未勾选 Save，也要先保存再重新打开 VA02 写 Data B。
-                        need_save_before_data_b = bool(need_data_b and item_added)
-                        need_first_va02_save = first_va02_changed and (
-                            flow_options.get('saveCheck') or need_save_before_data_b
+                    # Primary CS 必填：为空、或 CS 名未录入 config 人员名单（解析不出 CS 编号）时，
+                    # SAP 伙伴页的"负责雇员"无从写入，创建/编辑都没有意义，直接跳过当前订单。
+                    # 与 Invoice Number 同层拦截，故创建与编辑两条分支同时覆盖。
+                    cs_name = self._excel_str(order_row.get('Primary CS'))
+                    if not self._resolve_cs_code(order_row):
+                        cs_msg = (
+                            'Primary CS 为空（必填），跳过不新建/编辑' if not cs_name
+                            else 'Primary CS [%s] 不在配置文件中（取不到 CS 编号），跳过不新建/编辑' % cs_name
                         )
-                        if need_first_va02_save:
-                            save_step_name = (
-                                'Save VA02 Before Data B'
-                                if need_save_before_data_b
-                                else 'Save VA02'
-                            )
-                            save_va02_result = service.save('VA02')
-                            pre_data_b_save_ok = save_va02_result.success
-                            remarks.append(
-                                f"{save_step_name}:{save_va02_result.message}"
-                                if save_va02_result.message
-                                else save_step_name
-                            )
-                            _report_step(save_step_name, save_va02_result)
+                        log_file.loc[index, 'Remark'] = cs_msg
+                        log_file.to_excel(log_data_path, merge_cells=False, index=False)
+                        self.textBrowser.append(
+                            "<font color='red'>No.%s %s</font>" % (index + 1, cs_msg)
+                        )
+                        QApplication.processEvents()
+                        continue
 
-                        if need_data_b and item_failed:
+                    # 将当前订单关键字段回填到 GUI 控件，便于用户实时跟踪正在处理的订单。
+                    self._apply_order_row_to_gui(order_row)
+
+                    # everyCheck（checkBox_16）：每单开始前弹窗让用户确认是否处理；
+                    # 选 No 跳过当前订单（log 标记），继续下一单。放在 GUI 回填后、对象构建前，
+                    # 避免对跳过单做无谓的 DataFrame 转换和 SAP 校验。
+                    if flow_options.get('everyCheck'):
+                        combine_id_preview = self._excel_str(order_row.get('Combine Id'))
+                        project_no_preview = self._excel_str(order_row.get('Request Number'))
+                        cs_preview = self._excel_str(order_row.get('Primary CS'))
+                        sales_preview = self._excel_str(order_row.get('Sales'))
+                        confirm_msg = (
+                            '是否处理 No.%s 订单？\n\n'
+                            'Combine Id: %s\n'
+                            'Request Number: %s\n'
+                            'Primary CS: %s\n'
+                            'Sales: %s\n\n'
+                            '点击 Yes 继续，No 跳过当前订单'
+                        ) % (index + 1, combine_id_preview, project_no_preview, cs_preview, sales_preview)
+                        reply = QMessageBox.question(
+                            self,
+                            '订单确认',
+                            confirm_msg,
+                            QMessageBox.Yes | QMessageBox.No,
+                            QMessageBox.Yes,
+                        )
+                        if reply != QMessageBox.Yes:
+                            log_file.loc[index, 'Remark'] = '用户选择跳过'
+                            log_file.to_excel(log_data_path, merge_cells=False, index=False)
                             self.textBrowser.append(
-                                "<font color='red'>Add Item 失败，跳过当前订单的 Data B 步骤</font>"
+                                "<font color='orange'>No.%s 用户选择跳过</font>" % (index + 1)
                             )
                             QApplication.processEvents()
+                            continue
 
-                        if need_data_b and not item_failed and pre_data_b_save_ok:
-                            reopen_result = SapResult()
-                            if first_va02_changed and need_first_va02_save:
-                                reopen_result = service.open_order(order_no)
-                                order_no = reopen_result.order_no or order_no or self._extract_order_no(sap_session)
-                                remarks.append(
-                                    f"VA02 Data B:{reopen_result.message}"
-                                    if reopen_result.message
-                                    else "VA02 Data B"
-                                )
-                                _report_step('Open VA02 Data B', reopen_result)
+                    # 三张 DataFrame 已包含完整业务数据，这里只做对象适配和 SAP 写入。
+                    order = self._build_order_from_dataframes(order_row, item_df)
+                    revenue = self._build_revenue_from_order_row(order_row)
+                    config = self._build_sap_config_from_order_row(order_row)
+                    data_b_entries, plan_cost_entries_by_item = self._build_sub_entries_from_dataframe(order_row, sub_df)
+                    service = OrderService(sap_session, config)
 
-                            if reopen_result.success:
-                                data_b_result = service.fill_lab_cost_entries(
-                                    data_b_entries,
-                                    order,
-                                )
-                                remarks.append(
-                                    f"Data B:{data_b_result.message}" if data_b_result.message else "Data B"
-                                )
-                                _report_step('Data B', data_b_result)
+                    # ===== 编辑分流：Order Number 有值 = 订单已存在，跳过 VA01 创建，进 VA02 对比更新 =====
+                    # Excel 会混排"有号=编辑 / 无号=创建"两类行；本分支只接管有号行，无号行落回下方原创建逻辑（行为不变）。
+                    excel_order_no = self._excel_str(order_row.get('Order Number'))
+                    if excel_order_no:
+                        self._edit_order_row(
+                            index, order_row, order, config,
+                            data_b_entries, plan_cost_entries_by_item,
+                            excel_order_no, flow_options, sap_session, log_file, log_data_path,
+                        )
+                        continue
 
-                                if flow_options.get('saveCheck'):
-                                    save_data_b_result = service.save('VA02')
-                                    remarks.append(
-                                        f"Save VA02 Data B:{save_data_b_result.message}"
-                                        if save_data_b_result.message
-                                        else "Save VA02 Data B"
+                    # 按本次勾选的步骤分级校验：缺啥提示啥，支持只跑 Data B / Plan Cost 的分批验证场景。
+                    need_va01_check = flow_options.get('va01Check')
+                    need_va02_items_check = flow_options.get('va02Check')
+                    need_data_b_check = flow_options.get('labCostCheck')
+                    need_plan_cost_check = flow_options.get('planCostCheck')
+
+                    # 订单号：优先 Excel；仅首行 + 单跑 Data B/Plan Cost 场景允许从 SAP 当前会话兜底读取
+                    # （用户已手动打开 VA02 页面的情况）。后续行漏填则直接缺失报错，避免误写同一订单。
+                    order_no = self._excel_str(order_row.get('Order Number'))
+                    if (
+                        not order_no
+                        and index == 0
+                        and (need_data_b_check or need_plan_cost_check)
+                        and not need_va01_check
+                    ):
+                        try:
+                            order_no = self._extract_order_no(sap_session)
+                        except Exception:
+                            order_no = ''
+
+                    missing_fields = []
+                    if need_va01_check and (not order.sap_no or not order.project_no):
+                        missing_fields.append('SAP No./Project No.')
+                    if (need_va01_check or need_va02_items_check) and not order.items:
+                        missing_fields.append('items')
+                    if (need_data_b_check or need_plan_cost_check) and not need_va01_check and not order_no:
+                        missing_fields.append('Order Number')
+
+                    if missing_fields:
+                        missing_msg = '关键订单信息缺失（%s）' % '/'.join(missing_fields)
+                        log_file.loc[index, 'Remark'] = missing_msg
+                        log_file.to_excel(log_data_path, merge_cells=False, index=False)
+                        self.textBrowser.append(
+                            "<font color='red'>No.%s %s</font>" % (index + 1, missing_msg)
+                        )
+                        QApplication.processEvents()
+                        continue
+
+                    if need_va01_check and self._is_date_before_today(order.ecd):
+                        ecd_msg = (
+                            "VA01创建失败：ECD %s 早于今天，不能早于订单创建日期"
+                            % order.ecd
+                        )
+                        log_file.loc[index, 'Remark'] = ecd_msg
+                        log_file.to_excel(log_data_path, merge_cells=False, index=False)
+                        self.textBrowser.append(
+                            "<font color='red'>No.%s %s</font>" % (index + 1, ecd_msg)
+                        )
+                        QApplication.processEvents()
+                        continue
+
+                    # textBrowser 抬头：基础信息 + Excel 未税金额。
+                    combine_id = self._excel_str(order_row.get('Combine Id'))
+                    primary_cs = self._excel_str(order_row.get('Primary CS'))
+                    sales_name = self._excel_str(order_row.get('Sales'))
+                    excel_amount_untaxed = self._excel_str(order_row.get('Untaxed amount'))
+                    items_revenue_total = sum(item.revenue for item in order.items)
+
+                    self.textBrowser.append('==================== No.%s ====================' % (index + 1))
+                    self.textBrowser.append("Combine Id: %s" % combine_id)
+                    self.textBrowser.append("Request Number: %s" % order.project_no)
+                    self.textBrowser.append("Primary CS: %s" % primary_cs)
+                    self.textBrowser.append("Sales: %s" % sales_name)
+                    self.textBrowser.append("未税金额(Excel): %s" % excel_amount_untaxed)
+                    self.textBrowser.append("Items 加和金额: %s" % format(items_revenue_total, ',.2f'))
+
+                    remarks = []
+
+                    # 写入 SAP 前的 Excel 表内一致性校验（业务原则：SAP 侧一律是对应币种的未税值，
+                    # 故 item 表 'Item price' 也必须是未税价）。Σ(Item price) ≠ 抬头 'Untaxed amount'
+                    # 通常意味着 item 表填了含税价（实测 212/200 = 1.06 即增值税率）。
+                    # 用户确认的处置：红字告警 + 记 log，但不拦截——是否作废由人工判断。
+                    excel_items_diff = self._excel_items_total_mismatch(
+                        items_revenue_total, excel_amount_untaxed
+                    )
+                    if excel_items_diff:
+                        remarks.append(excel_items_diff)
+                        self.textBrowser.append("<font color='red'>%s</font>" % excel_items_diff)
+                    QApplication.processEvents()
+
+                    # 业务流程：VA01(可选) -> Save VA01 -> 打开 VA02 -> Add Item
+                    # -> Plan Cost(可选) -> Save VA02 -> 打开 VA02 -> Data B(可选) -> Save VA02。
+                    # Save 复选框控制常规保存；但本次新增 item 后再做 Data B 时，会先强制保存 item，
+                    # 因为 Data B 依赖已落盘的 SAP item 号（1000/2000 等）。
+                    sap_amount_vat = ''
+
+                    _report_step = self._append_step_result
+
+                    # Step 1: VA01 创建订单头
+                    va01_done = False
+                    if flow_options.get('va01Check'):
+                        # contactCheck（checkBox_19）：未勾选时 add_contact=False，
+                        # _fill_partners 内部跳过联系人写入；add_sales_partner 保持默认。
+                        partner_options = PartnerOptions(
+                            add_contact=bool(flow_options.get('contactCheck')),
+                        )
+                        create_result = service.create_order(
+                            order, revenue, partner_options=partner_options
+                        )
+                        remarks.append(f"VA01:{create_result.message}" if create_result.message else "VA01")
+                        order_no = create_result.order_no or order_no
+                        sap_amount_vat = create_result.sap_amount_vat or sap_amount_vat
+                        va01_done = create_result.success
+                        _report_step('VA01', create_result)
+
+                    # Step 2: Save VA01 —— VA01 成功后，若有后续步骤或显式 saveCheck 都需要落盘
+                    need_save_va01 = va01_done and (
+                        flow_options.get('saveCheck')
+                        or flow_options.get('va02Check')
+                        or flow_options.get('labCostCheck')
+                        or flow_options.get('planCostCheck')
+                    )
+                    if need_save_va01:
+                        save_va01_result = service.save('VA01')
+                        if save_va01_result.success:
+                            saved_order_no = self._extract_order_no(sap_session)
+                            if saved_order_no:
+                                order_no = saved_order_no
+                            else:
+                                # SAP 保存命令未抛错但读不到订单号（业务级静默失败）→ 视为 VA01 段失败，
+                                # 否则下游 VA02/Data B/Plan Cost 会用空/残留订单号继续执行。
+                                va01_done = False
+                                save_va01_result = SapResult.fail(
+                                    "Save VA01 后未能读取到 Order No.", step="save"
+                                )
+                        else:
+                            # Save VA01 显式失败 → 视为 VA01 段失败，由 va01_blocked 守卫拦截后续步骤。
+                            va01_done = False
+                        remarks.append(
+                            f"Save VA01:{save_va01_result.message}" if save_va01_result.message else "Save VA01"
+                        )
+                        _report_step('Save VA01', save_va01_result)
+
+                    # Step 3-6: VA02 段。只要勾选了 va02Check / labCostCheck / planCostCheck 任意一项，就需要进入 VA02。
+                    # 当 VA01 被勾选但失败（va01_blocked=True）时短路 VA02 段，
+                    # 避免 SAP VA02 窗体残留上一个订单号导致 Add Item / Data B / Plan Cost 误写入上一单。
+                    has_va02_step = need_va02_items_check or need_data_b_check or need_plan_cost_check
+                    va01_blocked = bool(flow_options.get('va01Check')) and not va01_done
+                    need_va02 = not va01_blocked and has_va02_step
+
+                    # VA01 失败导致 VA02 段被跳过时给出红字提示，避免用户以为流程在静默运行。
+                    if va01_blocked and has_va02_step:
+                        self.textBrowser.append(
+                            "<font color='red'>VA01 失败，跳过当前订单的 VA02/Data B/Plan Cost 步骤</font>"
+                        )
+                        QApplication.processEvents()
+
+                    if need_va02:
+                        open_result = service.open_order(order_no)
+                        # 直接从 VA02 开始时，Excel 'Order Number' 可能为空；优先取 open_result，再兜底从 SAP 提取。
+                        order_no = open_result.order_no or order_no or self._extract_order_no(sap_session)
+                        remarks.append(f"VA02:{open_result.message}" if open_result.message else "VA02")
+                        _report_step('Open VA02', open_result)
+                        if order_no:
+                            # 立即在显示框反馈识别到的订单号，便于直接开始 VA02 场景的用户确认。
+                            self.textBrowser.append("识别到 Order No.: %s" % order_no)
+                            QApplication.processEvents()
+
+                        if open_result.success:
+                            first_va02_changed = False
+                            item_added = False
+                            item_failed = False
+                            pre_data_b_save_ok = True
+                            # add item 仅在 va02Check 时进行；纯 Data B / Plan Cost 场景不重复加 item。
+                            if flow_options.get('va02Check'):
+                                item_result = service.add_items(order, revenue)
+                                order_no = item_result.order_no or order_no
+                                remarks.append(f"Item:{item_result.message}" if item_result.message else "Item")
+                                sap_amount_vat = item_result.sap_amount_vat or sap_amount_vat
+                                item_added = item_result.success
+                                item_failed = not item_result.success
+                                first_va02_changed = first_va02_changed or item_result.success
+                                _report_step('Add Item', item_result)
+
+                            if flow_options.get('planCostCheck') and not item_failed:
+                                # 按 item 号让 SAP 侧实时定位物理行（target_item）——SAP 写完 item
+                                # 回车后按 POSNR 重排，列表索引不等于物理行；索引仅作 Excel 未给
+                                # item 号（由 SAP 自动分配）时的兜底。
+                                # sub 表未提供 plan cost 数据的 item 直接跳过。
+                                for row, item in enumerate(order.items):
+                                    plan_cost_entries = plan_cost_entries_by_item.get(item.item)
+                                    if not plan_cost_entries:
+                                        continue
+                                    plan_result = service.apply_plan_cost_entries(
+                                        plan_cost_entries, focus_row=row, target_item=item.item
                                     )
-                                    _report_step('Save VA02 Data B', save_data_b_result)
+                                    first_va02_changed = first_va02_changed or plan_result.success
+                                    remarks.append(
+                                        f"Plan Cost {item.item}:{plan_result.message}"
+                                        if plan_result.message
+                                        else f"Plan Cost {item.item}"
+                                    )
+                                    _report_step('Plan Cost %s' % item.item, plan_result)
 
-                    # VA02 段结束后再做一次最终兜底，覆盖中间步骤未回传 order_no 的边界情况。
-                    if not order_no:
-                        order_no = self._extract_order_no(sap_session)
+                            # 订单价值(AUFTRAGSWERT) 独立步骤：item 全部录入后，读 SAP 概览净值加和 × 汇率
+                            # 回填抬头字段。与 Data B(labCostCheck) 解耦，仅在本次成功新增 item 时执行；
+                            # 写入抬头后由下方 Save VA02 统一落盘（first_va02_changed 已因加 item 置真）。
+                            if flow_options.get('va02Check') and item_added:
+                                order_value_result = service.fill_order_value(order)
+                                first_va02_changed = first_va02_changed or order_value_result.success
+                                remarks.append(
+                                    f"订单价值:{order_value_result.message}"
+                                    if order_value_result.message else "订单价值"
+                                )
+                                _report_step('订单价值', order_value_result)
 
-                # SAP 加和金额为未税净值（全量重读 Σ VBAP-NETWR），理论上应等于 Excel
-                # "Untaxed amount"。与编辑分支共用 _amount_mismatch_message，口径完全一致。
-                diff_msg = self._amount_mismatch_message(
-                    "未税金额不一致", excel_amount_untaxed, sap_amount_vat,
-                    expected_name="Excel", actual_name="SAP",
-                )
-                amount_mismatch = bool(diff_msg)
-                if amount_mismatch:
-                    remarks.append(diff_msg)
+                            need_data_b = flow_options.get('labCostCheck') and data_b_entries
+                            # Data B 的 item 依赖已保存的 SAP item 号（1000/2000 等）。
+                            # 如果本次新增了 item，即使未勾选 Save，也要先保存再重新打开 VA02 写 Data B。
+                            need_save_before_data_b = bool(need_data_b and item_added)
+                            need_first_va02_save = first_va02_changed and (
+                                flow_options.get('saveCheck') or need_save_before_data_b
+                            )
+                            if need_first_va02_save:
+                                save_step_name = (
+                                    'Save VA02 Before Data B'
+                                    if need_save_before_data_b
+                                    else 'Save VA02'
+                                )
+                                save_va02_result = service.save('VA02')
+                                pre_data_b_save_ok = save_va02_result.success
+                                remarks.append(
+                                    f"{save_step_name}:{save_va02_result.message}"
+                                    if save_va02_result.message
+                                    else save_step_name
+                                )
+                                _report_step(save_step_name, save_va02_result)
 
-                log_file.loc[index, '操作类型'] = 'Create'
-                log_file.loc[index, 'Order No.'] = order_no
-                log_file.loc[index, 'Remark'] = ';'.join([item for item in remarks if item])
-                log_file.loc[index, 'Proforma No.'] = ''
-                log_file.loc[index, 'sapAmountVat'] = sap_amount_vat
-                log_file.loc[index, 'Update Time'] = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
-                log_file.to_excel(log_data_path, merge_cells=False, index=False)
+                            if need_data_b and item_failed:
+                                self.textBrowser.append(
+                                    "<font color='red'>Add Item 失败，跳过当前订单的 Data B 步骤</font>"
+                                )
+                                QApplication.processEvents()
 
-                # 订单结束摘要：order no + SAP 未税金额；与 Excel 未税金额一致性提示。
-                self.textBrowser.append("Order No.: %s" % order_no)
-                self.textBrowser.append("SAP 金额(加和,未税): %s" % (sap_amount_vat or '--'))
-                if amount_mismatch:
-                    self.textBrowser.append("<font color='red'>%s</font>" % diff_msg)
-                elif self._to_amount(excel_amount_untaxed) > 0:
-                    self.textBrowser.append("未税金额一致(Excel == SAP)")
-                self.textBrowser.append('----------------------------------')
-                QApplication.processEvents()
+                            if need_data_b and not item_failed and pre_data_b_save_ok:
+                                reopen_result = SapResult()
+                                if first_va02_changed and need_first_va02_save:
+                                    reopen_result = service.open_order(order_no)
+                                    order_no = reopen_result.order_no or order_no or self._extract_order_no(sap_session)
+                                    remarks.append(
+                                        f"VA02 Data B:{reopen_result.message}"
+                                        if reopen_result.message
+                                        else "VA02 Data B"
+                                    )
+                                    _report_step('Open VA02 Data B', reopen_result)
 
-            self.textBrowser.append("订单数据已处理完成")
+                                if reopen_result.success:
+                                    data_b_result = service.fill_lab_cost_entries(
+                                        data_b_entries,
+                                        order,
+                                    )
+                                    remarks.append(
+                                        f"Data B:{data_b_result.message}" if data_b_result.message else "Data B"
+                                    )
+                                    _report_step('Data B', data_b_result)
+
+                                    if flow_options.get('saveCheck'):
+                                        save_data_b_result = service.save('VA02')
+                                        remarks.append(
+                                            f"Save VA02 Data B:{save_data_b_result.message}"
+                                            if save_data_b_result.message
+                                            else "Save VA02 Data B"
+                                        )
+                                        _report_step('Save VA02 Data B', save_data_b_result)
+
+                        # VA02 段结束后再做一次最终兜底，覆盖中间步骤未回传 order_no 的边界情况。
+                        if not order_no:
+                            order_no = self._extract_order_no(sap_session)
+
+                    # SAP 加和金额为未税净值（全量重读 Σ VBAP-NETWR），理论上应等于 Excel
+                    # "Untaxed amount"。与编辑分支共用 _amount_mismatch_message，口径完全一致。
+                    diff_msg = self._amount_mismatch_message(
+                        "未税金额不一致", excel_amount_untaxed, sap_amount_vat,
+                        expected_name="Excel", actual_name="SAP",
+                    )
+                    amount_mismatch = bool(diff_msg)
+                    if amount_mismatch:
+                        remarks.append(diff_msg)
+
+                    log_file.loc[index, '操作类型'] = 'Create'
+                    log_file.loc[index, 'Order No.'] = order_no
+                    log_file.loc[index, 'Remark'] = ';'.join([item for item in remarks if item])
+                    log_file.loc[index, 'Proforma No.'] = ''
+                    log_file.loc[index, 'sapAmountVat'] = sap_amount_vat
+                    log_file.loc[index, 'Update Time'] = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+                    log_file.to_excel(log_data_path, merge_cells=False, index=False)
+
+                    # 订单结束摘要：order no + SAP 未税金额；与 Excel 未税金额一致性提示。
+                    self.textBrowser.append("Order No.: %s" % order_no)
+                    self.textBrowser.append("SAP 金额(加和,未税): %s" % (sap_amount_vat or '--'))
+                    if amount_mismatch:
+                        self.textBrowser.append("<font color='red'>%s</font>" % diff_msg)
+                    elif self._to_amount(excel_amount_untaxed) > 0:
+                        self.textBrowser.append("未税金额一致(Excel == SAP)")
+                    self.textBrowser.append('----------------------------------')
+                    QApplication.processEvents()
+
+                except Exception as row_exc:
+                    row_msg = '执行异常已跳过: %s' % row_exc
+                    prev_remark = str(log_file.loc[index, 'Remark'] or '').strip()
+                    log_file.loc[index, 'Remark'] = (
+                        '%s;%s' % (prev_remark, row_msg) if prev_remark else row_msg
+                    )
+                    if not str(log_file.loc[index, '操作类型'] or '').strip():
+                        log_file.loc[index, '操作类型'] = 'Error'
+                    log_file.loc[index, 'Update Time'] = datetime.datetime.today().strftime(
+                        '%Y-%m-%d %H:%M:%S'
+                    )
+                    log_file.to_excel(log_data_path, merge_cells=False, index=False)
+                    self.textBrowser.append(
+                        "<font color='red'>No.%s %s</font>" % (index + 1, row_msg)
+                    )
+                    self.textBrowser.append('----------------------------------')
+                    QApplication.processEvents()
+                    continue
+            # 中止与正常跑完都走同一收尾（释放会话、打开 log），仅文案区分，
+            # 避免中止路径漏掉 log 提示让用户找不到已完成部分的记录。
+            finish_msg = '订单数据已中止（部分订单未处理）' if cancelled else '订单数据已处理完成'
+            self.textBrowser.append(finish_msg)
             self.textBrowser.append("log数据:%s" % log_data_path)
             self.textBrowser.append('----------------------------------')
             self._open_log_after_sap_run(log_data_path)
-            QMessageBox.information(self, "提示信息", "订单数据已处理完成", QMessageBox.Yes)
+            QMessageBox.information(self, "提示信息", finish_msg, QMessageBox.Yes)
         except Exception as msg:
             self.textBrowser.append('订单数据处理失败:%s' % msg)
             self.textBrowser.append('----------------------------------')
             QMessageBox.information(self, "提示信息", '订单数据处理失败:%s' % msg, QMessageBox.Yes)
         finally:
+            # 先复位运行标志再关会话：标志复位后用户点 ✕ 即可正常退出。
+            self._end_sap_task()
             if sap_session is not None:
                 sap_session.close()
 
