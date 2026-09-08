@@ -1103,7 +1103,7 @@ class SapOrderMixin:
                 self.textBrowser.append("SAP 金额(加和,未税): %s" % (sap_amount_vat or '--'))
                 if amount_mismatch:
                     self.textBrowser.append("<font color='red'>%s</font>" % diff_msg)
-                elif excel_amount_value > 0:
+                elif self._to_amount(excel_amount_untaxed) > 0:
                     self.textBrowser.append("未税金额一致(Excel == SAP)")
                 self.textBrowser.append('----------------------------------')
                 QApplication.processEvents()
