@@ -53,18 +53,21 @@ class OrderEditTransaction:
 
     # 伙伴角色 PARVW key。ZG/VE 由创建路径 order.py:_fill_partners 实测确认。
     #
-    # _PARVW_EMPLOYEE（负责雇员/CS 行）**至今未知**：`ER` 是 SAP SD 标准值推断，已被实机
-    # 否决（2026-08-25 log: `Primary CS:角色key ER 无效(待校正)`，set_key 被 combo 拒绝）。
-    # 所以 CS 段不再依赖它——按显示文本命中负责雇员行后只写值、不动 key（同创建口径）。
-    # 本常量仅用于"负责雇员行整行不存在"这一兜底分支，目前注定记「待校正」而不写脏数据；
-    # 真实 key 采集到后改这一处即可生效。
+    # **身份一律用 key，不用显示文本**：SAP 中文翻译不是单射，`WE`(Ship-to party) 与
+    # `ZG`(Global Partner) 的中文显示都是"送达方"，按文本判定角色必然张冠李戴。
+    # 旧版 `_GPC_TEXTS` 就把 WE 的译名"送达方"当成 ZG 的白名单，会在 set_key 被拒时
+    # 把 Buyer(GPC) 编码静默写进送达方行——该集合与对应分支已删除，不要再加回来。
+    #
+    # _PARVW_EMPLOYEE_FALLBACK（负责雇员/CS 行）是**猜测值**：`ER` 为 SAP SD 标准值推断，
+    # 已被实机否决（2026-08-25 log: `Primary CS:角色key ER 无效(待校正)`）。真实 key 改由
+    # _employee_key() 从 combo 选项表反查，本常量仅在反查不可用时兜底。
     _PARVW_GPC = "ZG"
     _PARVW_SALES = "VE"
-    _PARVW_EMPLOYEE = "ER"
+    _PARVW_EMPLOYEE_FALLBACK = "ER"
 
     # 负责雇员行（CS 所在行）的界面显示文本，中/英双语环境各一。
-    _EMPLOYEE_TEXTS = frozenset({"负责雇员", "Employee respons."})
-    _GPC_TEXTS = frozenset({"GPC", "Buyer(GPC)", "Buyer (GPC)", "Global Partner", "送达方"})
+    # 仅用于两处：① 从 combo 选项表反查真实 PARVW key；② 选项表不可用时的兜底行扫描。
+    _EMPLOYEE_TEXTS = frozenset({"负责雇员", "Employee respons.", "Employee Responsible"})
 
     # Sales(VE) 的创建口径行位（order.py:_fill_partners 写死行 7）。行 4/5 归负责雇员与
     # Buyer(GPC)、行 6 归联系人(AP)，故 VE 从无到有时落行 7 才与创建一致。
@@ -75,6 +78,9 @@ class OrderEditTransaction:
         self.session = session
         self.config = config
         self._base = OrderTransaction(session, config)
+        # 负责雇员 PARVW key 的反查缓存：None=尚未查，""=查过但无法确定（歧义/无选项表）。
+        # 选项表是系统级配置，一个会话内不会变，故只读一次，避免逐行重复 COM 调用。
+        self._employee_key_cache: str | None = None
     # ------------------------------------------------------------------ #
     # 对比原语
     # ------------------------------------------------------------------ #
@@ -432,10 +438,14 @@ class OrderEditTransaction:
             Primary CS = config.cs_code → 负责雇员行
             Sales(选填) = config.sales_code → VE 行
 
-        **行位沿用创建同源口径**（见 _resolve_partner_rows / _resolve_sales_row），不按
-        角色 key 搜索后落到空行：SAP 自动带出的行 4/5 一为负责雇员、另一为送达方，创建流程
-        把送达方那行改成 ZG 写 Buyer 值（"送达方就是 buyer"的由来），VE 固定行 7。补到别的
-        行 SAP 不认——这是第一轮"找不到就新增到空行"修法失败的原因。
+        **定位一律按 PARVW key**：三个角色都先全表扫 key，命中即该行角色正确（连 set_key
+        都不必调）；扫不到才回落创建同源行位（见 _resolve_partner_rows / _resolve_sales_row）
+        并改写角色——SAP 自动带出的行 4/5 一为负责雇员、另一为原生送达方(WE)，创建流程把后者
+        的角色改成 ZG 写 Buyer 值（"送达方就是 buyer"的由来），VE 固定行 7。补到别的空行
+        SAP 不认——这是第一轮"找不到就新增到空行"修法失败的原因。
+
+        绝不按**显示文本**认角色：WE 与 ZG 的中文都是"送达方"，认错行就把 Buyer 编码
+        写到送达方身上（见 _ensure_parvw_key 的历史说明）。
 
         覆盖用户 2026-08-25 提的两种情况，合并为一条幂等规则：
             ① 付款方变动（Excel SAP No. 改动 → _edit_sold_to 写入 → SAP 重跑 partner
@@ -450,21 +460,20 @@ class OrderEditTransaction:
             "SAPLV09C:1000/tblSAPLV09CGV_TC_PARTNER_OVERVIEW"
         )
 
-        # 行位一次定完：行 4/5 的归属由 SAP 带出的角色决定，本方法内不会变化。
-        employee_row, gpc_row = self._resolve_partner_rows(partner_prefix)
-
         # 三段均为"期望值为空则整段跳过"——没有期望值时既不改也不补。
 
-        # Buyer(GPC)：固定落 gpc_row，角色强制为 ZG（SAP 重置后该行常被恢复成送达方）。
+        # Buyer(GPC)：已有 ZG 行则用之（parvw_key=None，零 set_key），否则落创建口径行位
+        # 并把角色改成 ZG（SAP 重置后该行常被恢复成原生送达方 WE）。
         if order.global_partner_code:
+            gpc_row, gpc_key = self._resolve_gpc_row(partner_prefix)
             self._sync_partner_row(
-                partner_prefix, gpc_row, self._PARVW_GPC, order.global_partner_code,
-                field="GPC Code", diffs=diffs, expect_texts=self._GPC_TEXTS,
+                partner_prefix, gpc_row, gpc_key, order.global_partner_code,
+                field="GPC Code", diffs=diffs,
             )
 
-        # Primary CS：优先按显示文本全表扫描定位负责雇员行——命中即证明该行角色正确，
-        # 只写值、绝不动 key（口径同创建 order.py:165）。改 key 是纯风险动作，实机已证明
-        # 该 combo 不接受 `ER`（log: `Primary CS:角色key ER 无效(待校正)`），而它本不需改。
+        # Primary CS：先按 key 全表扫描定位负责雇员行（key 由选项表反查得到），扫不到再
+        # 退回显示文本扫描。命中即证明该行角色正确，只写值、绝不动 key（口径同创建
+        # order.py:165）——改 key 是纯风险动作，实机已证明该 combo 不接受 `ER`。
         if self.config.cs_code:
             cs_row = self._find_employee_row(partner_prefix)
             if cs_row is not None:
@@ -473,12 +482,14 @@ class OrderEditTransaction:
                     field="Primary CS", diffs=diffs,
                 )
             else:
-                # 负责雇员行整行不存在：只能凭推断的 _PARVW_EMPLOYEE 新建，自证机制保证
-                # 不写脏数据。ER 已被实机否决，故这条分支目前注定记「待校正」——留着是为了
-                # 留痕（否则该场景静默无声），真实 key 采集到后改常量即可生效。
+                # 负责雇员行整行不存在：只能新建。角色 key 优先用选项表反查值，反查不到才
+                # 用被实机否决过的 _PARVW_EMPLOYEE_FALLBACK——那种情况注定记「待校正」而
+                # 不写脏数据，留痕总好过静默无声。
+                employee_row = self._resolve_partner_rows(partner_prefix)[0]
                 self._sync_partner_row(
-                    partner_prefix, employee_row, self._PARVW_EMPLOYEE, self.config.cs_code,
-                    field="Primary CS", diffs=diffs, expect_texts=self._EMPLOYEE_TEXTS,
+                    partner_prefix, employee_row,
+                    self._employee_key(partner_prefix) or self._PARVW_EMPLOYEE_FALLBACK,
+                    self.config.cs_code, field="Primary CS", diffs=diffs,
                 )
 
         # Sales（选填）：已有 VE 行用之，否则落创建口径的行 7（见 _resolve_sales_row）。
@@ -508,12 +519,11 @@ class OrderEditTransaction:
         *,
         field: str,
         diffs: list[str],
-        expect_texts: frozenset[str] | None = None,
     ) -> None:
         """把指定**行位**的伙伴角色同步到期望值：角色 key 不符先纠正，再对比写编码。
 
-        行位由调用方按创建同源口径给定（见 _resolve_partner_rows），本方法不做定位。
-        对 SAP 清空伙伴后的四种状态一律收敛到期望值：
+        行位由调用方定好（见 _resolve_gpc_row / _find_employee_row / _resolve_sales_row），
+        本方法不做定位。对 SAP 清空伙伴后的四种状态一律收敛到期望值：
 
             行在、值空       → key 已对，只写值（付款方变动场景）
             行在、值不对     → 只写值（三字段自身变动场景）
@@ -522,17 +532,12 @@ class OrderEditTransaction:
 
         Args:
             row: 目标行号；None 表示定位失败（如无空行可用），记待校正后跳过。
-            parvw_key: 目标角色 key；传 **None** 表示该行角色已确认正确（如按显示文本命中
-                的负责雇员行），跳过角色纠正只写值——口径同创建 order.py:165 写 CS。
+            parvw_key: 目标角色 key；传 **None** 表示该行角色已确认正确（按 key 扫描命中的
+                行都属此类），跳过角色纠正只写值——口径同创建 order.py:165 写 CS。
                 改 key 是纯风险动作：实机已证明负责雇员行不接受 `ER`，而它本来就不需要改。
-            expect_texts: 传入时启用角色自证——改完 key 后回读该行 combo 显示文本，
-                不在集合内即认定 key 用错，跳过写值并记「待校正」。供 key 未经实测的
-                角色使用（CS/_PARVW_EMPLOYEE），已实测的 ZG/VE 不必传。
 
-        写脏数据的两道闸（key 错时宁可不写，也不能把编码挂到错误角色上）：
-            ① set_key 抛错（key 不在 combo 选项里）→ 记待校正、不写编码；
-            ② 显示文本与 expect_texts 不符 → 记待校正、不写编码。
-        两种情况都不动 partner 列，SAP 侧保持原样。
+        角色 key 无法确保为期望值时（见 _ensure_parvw_key 的四类失败）一律不写编码，
+        partner 列保持 SAP 原样——宁可少写，也不能把编码挂到错误角色上。
         """
         if not self._norm(value):
             return
@@ -542,9 +547,7 @@ class OrderEditTransaction:
 
         if parvw_key is not None:
             parvw_id = self._parvw_id(partner_prefix, row)
-            if not self._ensure_parvw_key(
-                parvw_id, parvw_key, field=field, diffs=diffs, expect_texts=expect_texts
-            ):
+            if not self._ensure_parvw_key(parvw_id, parvw_key, field=field, diffs=diffs):
                 return
 
         self._compare_partner_and_confirm(
@@ -552,18 +555,22 @@ class OrderEditTransaction:
         )
 
     def _ensure_parvw_key(
-        self,
-        parvw_id: str,
-        parvw_key: str,
-        *,
-        field: str,
-        diffs: list[str],
-        expect_texts: frozenset[str] | None = None,
+        self, parvw_id: str, parvw_key: str, *, field: str, diffs: list[str]
     ) -> bool:
         """确保该行角色为 parvw_key；已对则不动，不对则改写。返回是否可安全写编码。
 
         角色已正确时直接返回 True 且不记 diffs——绝大多数订单走这条零开销路径。
         改写角色本身也记入 diffs（`字段:角色 X→Y`），便于从 log 看出 SAP 重置过伙伴表。
+
+        **自证只认 key，不认显示文本。** 旧版在 set_key 被拒时回读显示文本，命中白名单就
+        当作"角色本来就对"继续写编码；而 `WE`(Ship-to party) 与 `ZG`(Global Partner) 的
+        中文都是"送达方"，这条兜底会把 Buyer(GPC) 编码静默写进送达方行。该分支已删除。
+
+        set_key 失败时借 combo 选项表把原因分成三类写进 diffs，一次实机跑完即可定性：
+            key 不在选项表  → 该屏/该客户根本不允许这个角色，需业务侧确认正确 key；
+            key 在但写不进  → 角色列只读（已保存订单的强制伙伴行常如此），需换行位；
+            选项表读不到    → 老版 SAP GUI 无 Entries，退回原有的笼统文案。
+        四类失败一律返回 False，partner 列保持原样。
         """
         try:
             current = (self.session.find(parvw_id).key or "").strip()
@@ -572,33 +579,78 @@ class OrderEditTransaction:
             return False
 
         if current != parvw_key:
-            # 闸①：set_key 底层是 COM 赋值，非法 key 抛的不一定是 SapUiError，
+            # set_key 底层是 COM 赋值，非法 key 抛的不一定是 SapUiError，
             # 用 Exception 兜底（口径同 _edit_short_text 的语言设置）。
             try:
                 self.session.set_key(parvw_id, parvw_key)
             except Exception:
-                try:
-                    actual = (self.session.read_text(parvw_id) or "").strip()
-                except SapUiError:
-                    actual = ""
-                if expect_texts is not None and actual in expect_texts:
-                    return True
-                diffs.append(f"{field}:角色key {parvw_key} 无效(待校正)")
+                diffs.append(self._diagnose_parvw_failure(parvw_id, parvw_key, field, current))
                 return False
             diffs.append(f"{field}:角色 {current or '(空)'}→{parvw_key}")
 
-        # 闸②：key 合法但对应角色不对。回读失败按"无法自证"处理，同样不写编码。
-        if expect_texts is not None:
+            # 写后回读自证：key 唯一无歧义，回不到期望值说明 SAP 悄悄改回去了。
             try:
-                actual = (self.session.read_text(parvw_id) or "").strip()
+                actual = (self.session.find(parvw_id).key or "").strip()
             except SapUiError:
                 actual = ""
-            if actual not in expect_texts:
+            if actual != parvw_key:
                 diffs.append(
-                    f"{field}:角色key {parvw_key} 对应「{actual or '(空)'}」非预期(待校正)"
+                    f"{field}:角色key回读不符({parvw_key}→{actual or '(空)'})(待校正)"
                 )
                 return False
         return True
+
+    def _diagnose_parvw_failure(
+        self, parvw_id: str, parvw_key: str, field: str, current: str
+    ) -> str:
+        """set_key 被拒后生成可定性的 diff 文案（见 _ensure_parvw_key 的三类原因）。"""
+        entries = self.session.list_combo_entries(parvw_id)
+        if not entries:
+            return f"{field}:角色key {parvw_key} 无效(待校正)"
+        if any(key == parvw_key for key, _ in entries):
+            return f"{field}:角色列不可改(当前{current or '(空)'})(待校正)"
+        options = "/".join(key for key, _ in entries if key)
+        return f"{field}:角色key {parvw_key} 不在可选项[{options}](待校正)"
+
+    def _lookup_role_key(self, parvw_id: str, texts: frozenset[str]) -> str | None:
+        """从 combo 选项表反查显示文本对应的 PARVW key；**唯一命中才采信**。
+
+        命中 0 项（选项表不可用/译名不在集合内）或 ≥2 项（多个角色同名，如中文环境下
+        WE 与 ZG 都叫"送达方"）一律返回 None——歧义时宁可弃权，也不猜。
+        """
+        keys = {
+            key for key, text in self.session.list_combo_entries(parvw_id)
+            if key and text in texts
+        }
+        return keys.pop() if len(keys) == 1 else None
+
+    def _employee_key(self, partner_prefix: str) -> str:
+        """负责雇员角色的真实 PARVW key（从选项表反查，每会话只查一次）；查不到返回 ""。
+
+        存在意义：该 key 至今未由实机确认，`ER` 的推断已被否决（2026-08-25 log:
+        `Primary CS:角色key ER 无效(待校正)`）。反查成功即可让 CS 行按 key 定位，
+        不再依赖"负责雇员"这个显示文本。
+        """
+        if self._employee_key_cache is None:
+            self._employee_key_cache = (
+                self._lookup_role_key(self._parvw_id(partner_prefix, 0), self._EMPLOYEE_TEXTS)
+                or ""
+            )
+        return self._employee_key_cache
+
+    def _resolve_gpc_row(self, partner_prefix: str) -> tuple[int, str | None]:
+        """定出 Buyer(GPC) 的目标行与需写入的角色 key。
+
+        返回 (行号, 角色key)；角色key 为 None 表示该行已是 ZG，调用方不必也不应改角色。
+
+        已有 ZG 行优先——SAP 重跑 partner determination 后行序可能变（本次 `GPC Code:
+        角色key ZG 无效(待校正)` 的根因就是盲信行 4/5，落到角色列只读的强制伙伴行上）。
+        没有 ZG 行才回落创建同源行位并改角色，与 order.py:_fill_partners 保持一致。
+        """
+        zg_row = self._find_partner_row(partner_prefix, self._PARVW_GPC)
+        if zg_row is not None:
+            return zg_row, None
+        return self._resolve_partner_rows(partner_prefix)[1], self._PARVW_GPC
 
     def _resolve_partner_rows(self, partner_prefix: str) -> tuple[int, int]:
         """按创建同源口径定出 (负责雇员行, Buyer/GPC 行)，即 order.py:157-159 的判定。
@@ -607,13 +659,13 @@ class OrderEditTransaction:
         创建流程把后者的角色强改为 ZG 并写入 Buyer(GPC) 值——这就是"送达方就是 buyer"的由来。
         编辑必须沿用同一行位，否则补到别的行 SAP 不认（第一轮"补到空行"失败的原因）。
 
-        行 4 读不到（屏态异常）时退回创建路径的默认分支 (5, 4)，与创建行为一致。
+        负责雇员行由 _find_employee_row 按 key 定位（key 不可用时才退回显示文本）；
+        它不在行 4/5 或定位不到时，退回创建路径的默认分支 (5, 4)，与创建行为一致。
         """
-        try:
-            four_name = (self.session.read_text(self._parvw_id(partner_prefix, 4)) or "").strip()
-        except SapUiError:
-            four_name = ""
-        return (4, 5) if four_name in self._EMPLOYEE_TEXTS else (5, 4)
+        employee_row = self._find_employee_row(partner_prefix)
+        if employee_row in (4, 5):
+            return employee_row, 9 - employee_row
+        return (5, 4)
 
     def _resolve_sales_row(self, partner_prefix: str) -> int | None:
         """定出 Sales(VE) 的目标行：已有 VE 行则用它，否则用创建口径的行 7。
@@ -657,16 +709,21 @@ class OrderEditTransaction:
         return None
 
     def _find_employee_row(self, partner_prefix: str, max_rows: int = 12) -> int | None:
-        """按显示文本全表扫描定位负责雇员行（CS 所在行）；找不到返回 None。
+        """全表扫描定位负责雇员行（CS 所在行）；找不到返回 None。
 
-        比 _resolve_partner_rows 的"只看行 4/5"更稳：SAP 重跑 partner determination 后
-        负责雇员行可能换到别的行号，那时 _resolve_partner_rows 会盲目退回 (5,4)，把 CS
-        写到一个根本不是负责雇员的行上。
+        比"只看行 4/5"更稳：SAP 重跑 partner determination 后负责雇员行可能换到别的行号，
+        盲目退回 (5,4) 会把 CS 写到一个根本不是负责雇员的行上。
 
-        按显示文本而非 PARVW key 匹配——该角色的 key 至今未知：`ER` 推断已被实机否决
-        （2026-08-25 log: `Primary CS:角色key ER 无效(待校正)`）。命中即证明角色正确，
-        调用方只写值、不动 key，故无需知道 key 是什么。
+        优先按 PARVW key 匹配（key 由 _employee_key 从选项表反查）。反查不到时才退回显示
+        文本匹配——"负责雇员"这个译名在实测环境中未见歧义，作兜底可接受；真正有歧义的是
+        "送达方"(WE/ZG 同名)，那条路径已彻底改为 key 驱动。
+
+        命中即证明该行角色正确，调用方只写值、不动 key。
         """
+        employee_key = self._employee_key(partner_prefix)
+        if employee_key:
+            return self._find_partner_row(partner_prefix, employee_key, max_rows)
+
         for row in range(max_rows):
             try:
                 text = self.session.read_text(self._parvw_id(partner_prefix, row))

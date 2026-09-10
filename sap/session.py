@@ -96,6 +96,29 @@ class SapSession:
         except Exception as exc:
             raise SapWriteError(f"下拉框写入被拒: {element_id} = {value!r} ({exc})") from exc
 
+    def list_combo_entries(self, element_id: str) -> list[tuple[str, str]]:
+        """枚举下拉框全部可选项，返回 [(key, 显示文本), ...]；不可枚举时返回 []。
+
+        这是"文本世界收敛到 key 世界"的唯一入口。SAP 的中文翻译不是单射：
+        `WE`(Ship-to party) 与 `ZG`(Global Partner) 的中文显示**都是"送达方"**，
+        按显示文本判定角色必然张冠李戴（曾导致 Buyer(GPC) 编码被写进送达方行）。
+        身份判定一律用 key，需要从文本反推 key 时经本方法枚举后**唯一命中才采信**。
+
+        故意不抛异常：控件不是 combo、SAP GUI 版本无 `Entries` 属性时一律返回 []，
+        让调用方无缝回落到原有的显示文本兜底路径，不因诊断能力缺失而中断编辑流程。
+        """
+        try:
+            entries = self.find(element_id).Entries
+            return [
+                (
+                    str(entries.ElementAt(i).Key or "").strip(),
+                    str(entries.ElementAt(i).Value or "").strip(),
+                )
+                for i in range(entries.Count)
+            ]
+        except Exception:
+            return []
+
     def set_selected(self, element_id: str, value: bool) -> None:
         """写入复选框选中状态。"""
         self.find(element_id).selected = value

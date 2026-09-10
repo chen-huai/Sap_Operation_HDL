@@ -46,8 +46,16 @@ PARTNER_PREFIX = (
 
 PARVW_MARK = "cmbGVS_TC_DATA-REC-PARVW"
 
-# SAP 侧 PARVW key → combo 显示文本，供角色自证分支的桩联动。
-ROLE_TEXTS = {"ZG": "GPC", "ER": "负责雇员", "VE": "销售员", "WE": "送达方"}
+# SAP 侧的**系统级 PARVW 选项表**：key → combo 显示文本。同一屏所有 PARVW 下拉框共享，
+# 既驱动桩控件的 key→text 联动，也作为 `Entries` 枚举的数据源。
+ROLE_TEXTS = {"AG": "售达方", "ZG": "GPC", "ER": "负责雇员", "VE": "销售员", "WE": "送达方"}
+
+# 负责雇员的真实 key 为未知值 ZP 的环境（`ER` 已被实机否决）。
+ROLE_TEXTS_ZP = {"AG": "售达方", "ZG": "GPC", "ZP": "负责雇员", "VE": "销售员", "WE": "送达方"}
+
+# 中文翻译歧义环境：Ship-to party(WE) 与 Global Partner(ZG) 的显示文本**都是"送达方"**。
+# 这正是 `GPC Code:角色key ZG 无效(待校正)` 背后不能按文本认角色的原因。
+ROLE_TEXTS_AMBIGUOUS = {"AG": "售达方", "WE": "送达方", "ZG": "送达方", "ER": "负责雇员"}
 
 
 def _parvw_id(row: int) -> str:
@@ -79,18 +87,61 @@ class _Element:
         pass
 
 
+class _ComboEntry:
+    """GuiComboBoxEntry 桩：一个下拉选项的 (Key, Value)。"""
+
+    def __init__(self, key: str, value: str):
+        self.Key = key
+        self.Value = value
+
+
+class _ComboEntries:
+    """GuiCollection 桩：按 Count / ElementAt(i) 访问，与 SAP GUI Scripting 一致。"""
+
+    def __init__(self, role_texts: dict[str, str]):
+        self._items = [_ComboEntry(k, v) for k, v in role_texts.items()]
+
+    @property
+    def Count(self) -> int:
+        return len(self._items)
+
+    def ElementAt(self, index: int) -> _ComboEntry:
+        return self._items[index]
+
+
 class _ComboElement(_Element):
     """PARVW 下拉框桩：写 key 时按 role_texts 联动显示文本，模拟真实 combo。
 
-    `invalid_keys` 里的 key 赋值抛错，模拟 SAP 对不在选项列表中的 key 的拒绝；
-    `role_texts` 可覆盖映射，用于构造"key 合法但角色对不上"的场景。
+    `role_texts` 同时是该 combo 的选项表，经 `Entries` 暴露给
+    `SapSession.list_combo_entries`——生产代码正是靠它把显示文本反查成 key。
+
+    `invalid_keys` 里的 key 赋值抛错，模拟 SAP 的拒绝（选项表里没有 / 角色列只读）；
+    `silent_keys` 里的 key 赋值被静默吞掉（不抛也不生效），模拟"写进去了但 SAP 改回来"，
+    用于验证写后回读自证。
     """
 
-    def __init__(self, role_texts: dict[str, str], invalid_keys: frozenset[str], key: str = ""):
+    def __init__(
+        self,
+        role_texts: dict[str, str],
+        invalid_keys: frozenset[str],
+        key: str = "",
+        *,
+        silent_keys: frozenset[str] = frozenset(),
+        entries_available: bool = True,
+    ):
         # 须先于 super()，父类 __init__ 里的 `self.key = ...` 会走下面的 setter。
         self._role_texts = role_texts
         self._invalid_keys = invalid_keys
+        self._silent_keys = silent_keys
+        self._entries_available = entries_available
         super().__init__(key=key)
+
+    @property
+    def Entries(self) -> _ComboEntries:
+        # 老版 SAP GUI 无此属性：用 AttributeError 模拟，验证生产代码的兜底路径。
+        if not self._entries_available:
+            raise AttributeError("Entries")
+        return _ComboEntries(self._role_texts)
 
     @property
     def key(self) -> str:
@@ -100,6 +151,8 @@ class _ComboElement(_Element):
     def key(self, value: str) -> None:
         if value in self._invalid_keys:
             raise ValueError(f"invalid PARVW key: {value}")
+        if value in self._silent_keys:
+            return
         self._key = value
         self.text = self._role_texts.get(value, "") if value else ""
 
@@ -107,7 +160,9 @@ class _ComboElement(_Element):
 class _RawSession:
     """按 element_id 缓存控件的最小 raw session；未知 id 返回空控件。
 
-    PARVW 下拉框走 `_ComboElement`（key→text 联动），其余走普通 `_Element`。
+    PARVW 下拉框走 `_ComboElement`（key→text 联动 + Entries 选项表），其余走普通 `_Element`。
+    preset 中的 combo 由 `_make_transaction` 统一对齐到同一张选项表——真实 SAP 里选项表是
+    系统级配置，同屏各行不可能不一致。
     """
 
     def __init__(
@@ -116,15 +171,28 @@ class _RawSession:
         *,
         role_texts: dict[str, str] | None = None,
         invalid_keys: frozenset[str] = frozenset(),
+        silent_keys: frozenset[str] = frozenset(),
+        entries_available: bool = True,
     ):
         self._cache: dict[str, _Element] = preset or {}
         self._role_texts = ROLE_TEXTS if role_texts is None else role_texts
         self._invalid_keys = invalid_keys
+        self._silent_keys = silent_keys
+        self._entries_available = entries_available
+        for element in self._cache.values():
+            if isinstance(element, _ComboElement):
+                element._role_texts = self._role_texts
+                element._invalid_keys = invalid_keys
+                element._silent_keys = silent_keys
+                element._entries_available = entries_available
 
     def findById(self, element_id: str) -> _Element:
         if element_id not in self._cache:
             self._cache[element_id] = (
-                _ComboElement(self._role_texts, self._invalid_keys)
+                _ComboElement(
+                    self._role_texts, self._invalid_keys,
+                    silent_keys=self._silent_keys, entries_available=self._entries_available,
+                )
                 if PARVW_MARK in element_id
                 else _Element()
             )
@@ -132,7 +200,10 @@ class _RawSession:
 
 
 def _combo(key: str, role_texts: dict[str, str] | None = None) -> _ComboElement:
-    """构造一个已带角色 key 的 PARVW 桩控件（显示文本按映射联动）。"""
+    """构造一个已带角色 key 的 PARVW 桩控件（显示文本按映射联动）。
+
+    role_texts 仅决定构造瞬间的显示文本；进入 `_RawSession` 后会被统一对齐到会话级选项表。
+    """
     return _ComboElement(ROLE_TEXTS if role_texts is None else role_texts, frozenset(), key=key)
 
 
@@ -143,8 +214,13 @@ def _make_transaction(
     sales_code: str = "SA001",
     role_texts: dict[str, str] | None = None,
     invalid_keys: frozenset[str] = frozenset(),
+    silent_keys: frozenset[str] = frozenset(),
+    entries_available: bool = True,
 ):
-    raw = _RawSession(preset, role_texts=role_texts, invalid_keys=invalid_keys)
+    raw = _RawSession(
+        preset, role_texts=role_texts, invalid_keys=invalid_keys,
+        silent_keys=silent_keys, entries_available=entries_available,
+    )
     session = SapSession(raw, raw, raw, raw)
     return OrderEditTransaction(session, _make_config(cs_code, sales_code)), raw
 
@@ -280,63 +356,64 @@ class SyncPartnerRowTest(unittest.TestCase):
         tx._sync_partner_row(PARTNER_PREFIX, None, "VE", "SA001", field="Sales", diffs=diffs)
         self.assertEqual(diffs, ["Sales:无可用行位(待校正)"])
 
-    def test_invalid_parvw_key_records_pending(self):
-        # 闸①：key 不在 combo 选项里 → 记待校正，且绝不写编码。
+    def test_key_present_but_readonly_records_pending(self):
+        # key 在选项表里却写不进 → 角色列只读（已保存订单的强制伙伴行常如此），不写编码。
         tx, raw = _make_transaction(invalid_keys=frozenset({"ER"}))
         diffs: list[str] = []
         tx._sync_partner_row(
             PARTNER_PREFIX, 4, "ER", "CS001", field="Primary CS", diffs=diffs,
-            expect_texts=OrderEditTransaction._EMPLOYEE_TEXTS,
         )
 
         self.assertEqual(raw.findById(_partner_id(4)).text, "")
-        self.assertEqual(diffs, ["Primary CS:角色key ER 无效(待校正)"])
+        self.assertEqual(diffs, ["Primary CS:角色列不可改(当前(空))(待校正)"])
 
-    def test_gpc_display_text_allows_unknown_key(self):
-        # 编辑屏实机存在：GPC 行显示文本正确，但 ZG key 被 combo 拒绝。此时不改 key，直接写 Buyer 值。
-        preset = {_parvw_id(5): _ComboElement({"ZP": "GPC"}, frozenset({"ZG"}), key="ZP")}
-        tx, raw = _make_transaction(preset, invalid_keys=frozenset({"ZG"}))
-        diffs: list[str] = []
-        tx._sync_partner_row(
-            PARTNER_PREFIX, 5, "ZG", "GP001", field="GPC Code", diffs=diffs,
-            expect_texts=OrderEditTransaction._GPC_TEXTS,
+    def test_key_absent_from_entries_lists_options(self):
+        # key 根本不在选项表 → 文案带出可选项，实机一眼看出该填哪个角色。
+        tx, raw = _make_transaction(
+            role_texts={"AG": "售达方", "WE": "送达方"}, invalid_keys=frozenset({"ZG"}),
         )
-
-        self.assertEqual(raw.findById(_parvw_id(5)).key, "ZP")
-        self.assertEqual(raw.findById(_partner_id(5)).text, "GP001")
-        self.assertEqual(diffs, ["GPC Code:(空)→GP001"])
-
-    def test_gpc_zg_accepts_localized_display_texts(self):
-        for display_text in ("Global Partner", "送达方"):
-            with self.subTest(display_text=display_text):
-                role_texts = {"ZG": display_text}
-                preset = {
-                    _parvw_id(5): _combo("ZG", role_texts),
-                    _partner_id(5): _Element(text="GP001"),
-                }
-                tx, raw = _make_transaction(preset, role_texts=role_texts)
-                diffs: list[str] = []
-                tx._sync_partner_row(
-                    PARTNER_PREFIX, 5, "ZG", "GP001", field="GPC Code", diffs=diffs,
-                    expect_texts=OrderEditTransaction._GPC_TEXTS,
-                )
-
-                self.assertEqual(raw.findById(_partner_id(5)).text, "GP001")
-                self.assertEqual(diffs, [])
-
-    def test_unexpected_role_text_skips_write(self):
-        # 闸②：key 合法但对应角色不是"负责雇员" → 不写编码。
-        tx, raw = _make_transaction(role_texts={"ER": "开票方"})
         diffs: list[str] = []
-        tx._sync_partner_row(
-            PARTNER_PREFIX, 4, "ER", "CS001", field="Primary CS", diffs=diffs,
-            expect_texts=OrderEditTransaction._EMPLOYEE_TEXTS,
-        )
+        tx._sync_partner_row(PARTNER_PREFIX, 5, "ZG", "GP001", field="GPC Code", diffs=diffs)
 
-        self.assertEqual(raw.findById(_partner_id(4)).text, "")
+        self.assertEqual(raw.findById(_partner_id(5)).text, "")
+        self.assertEqual(diffs, ["GPC Code:角色key ZG 不在可选项[AG/WE](待校正)"])
+
+    def test_entries_unavailable_keeps_legacy_message(self):
+        # 老版 SAP GUI 无 Entries → 退回原有的笼统文案，行为不回归。
+        tx, raw = _make_transaction(invalid_keys=frozenset({"ZG"}), entries_available=False)
+        diffs: list[str] = []
+        tx._sync_partner_row(PARTNER_PREFIX, 5, "ZG", "GP001", field="GPC Code", diffs=diffs)
+
+        self.assertEqual(raw.findById(_partner_id(5)).text, "")
+        self.assertEqual(diffs, ["GPC Code:角色key ZG 无效(待校正)"])
+
+    def test_ship_to_display_text_is_never_accepted_as_gpc(self):
+        """核心安全回归：显示文本"送达方"绝不能被当成 ZG 而写入 Buyer 编码。
+
+        旧实现在 set_key 被拒后回读显示文本，命中 `_GPC_TEXTS`（错误地含"送达方"）就
+        继续写值，于是 Buyer(GPC) 编码被静默挂到 Ship-to party(WE) 行上。
+        """
+        preset = {_parvw_id(5): _combo("WE", ROLE_TEXTS_AMBIGUOUS)}
+        tx, raw = _make_transaction(
+            preset, role_texts=ROLE_TEXTS_AMBIGUOUS, invalid_keys=frozenset({"ZG"}),
+        )
+        diffs: list[str] = []
+        tx._sync_partner_row(PARTNER_PREFIX, 5, "ZG", "GP001", field="GPC Code", diffs=diffs)
+
+        self.assertEqual(raw.findById(_parvw_id(5)).key, "WE")   # 角色未被改动
+        self.assertEqual(raw.findById(_partner_id(5)).text, "")  # 编码绝不落到送达方行
+        self.assertEqual(diffs, ["GPC Code:角色列不可改(当前WE)(待校正)"])
+
+    def test_key_readback_mismatch_skips_write(self):
+        # set_key 不抛错但没生效（SAP 悄悄改回）→ 回读自证失败，不写编码。
+        tx, raw = _make_transaction(silent_keys=frozenset({"ZG"}))
+        diffs: list[str] = []
+        tx._sync_partner_row(PARTNER_PREFIX, 5, "ZG", "GP001", field="GPC Code", diffs=diffs)
+
+        self.assertEqual(raw.findById(_partner_id(5)).text, "")
         self.assertEqual(
             diffs,
-            ["Primary CS:角色 (空)→ER", "Primary CS:角色key ER 对应「开票方」非预期(待校正)"],
+            ["GPC Code:角色 (空)→ZG", "GPC Code:角色key回读不符(ZG→(空))(待校正)"],
         )
 
 
@@ -429,10 +506,12 @@ class PrimaryCsRoleKeyTest(unittest.TestCase):
     def test_existing_employee_row_key_is_never_touched(self):
         # 负责雇员行 key 是未知值 ZP（非 ER）→ 只写 cs_code，key 保持 ZP，不记待校正。
         preset = {
-            _parvw_id(4): _combo("ZP", {"ZP": "负责雇员"}),
-            _parvw_id(5): _combo("WE"),
+            _parvw_id(4): _combo("ZP", ROLE_TEXTS_ZP),
+            _parvw_id(5): _combo("WE", ROLE_TEXTS_ZP),
         }
-        tx, raw = _make_transaction(preset, cs_code="CS001", sales_code="")
+        tx, raw = _make_transaction(
+            preset, cs_code="CS001", sales_code="", role_texts=ROLE_TEXTS_ZP,
+        )
         diffs: list[str] = []
         tx._edit_partners(_make_order(), diffs)
 
@@ -443,10 +522,12 @@ class PrimaryCsRoleKeyTest(unittest.TestCase):
     def test_employee_row_outside_four_five_is_found(self):
         # 负责雇员行被 SAP 排到行 3 → 全表扫描仍能命中，CS 落行 3。
         preset = {
-            _parvw_id(3): _combo("ZP", {"ZP": "负责雇员"}),
-            _parvw_id(4): _combo("WE"),
+            _parvw_id(3): _combo("ZP", ROLE_TEXTS_ZP),
+            _parvw_id(4): _combo("WE", ROLE_TEXTS_ZP),
         }
-        tx, raw = _make_transaction(preset, cs_code="CS001", sales_code="")
+        tx, raw = _make_transaction(
+            preset, cs_code="CS001", sales_code="", role_texts=ROLE_TEXTS_ZP,
+        )
         diffs: list[str] = []
         tx._edit_partners(_make_order(), diffs)
 
@@ -455,19 +536,34 @@ class PrimaryCsRoleKeyTest(unittest.TestCase):
 
     def test_stale_cs_value_is_updated_without_key_change(self):
         preset = {
-            _parvw_id(4): _combo("ZP", {"ZP": "负责雇员"}),
+            _parvw_id(4): _combo("ZP", ROLE_TEXTS_ZP),
             _partner_id(4): _Element(text="OLD_CS"),
         }
-        tx, raw = _make_transaction(preset, cs_code="CS001", sales_code="")
+        tx, raw = _make_transaction(
+            preset, cs_code="CS001", sales_code="", role_texts=ROLE_TEXTS_ZP,
+        )
         diffs: list[str] = []
         tx._edit_partners(_make_order(), diffs)
 
         self.assertEqual(raw.findById(_partner_id(4)).text, "CS001")
         self.assertEqual(diffs, ["Primary CS:OLD_CS→CS001"])
 
+    def test_missing_employee_row_uses_key_from_entries(self):
+        # 负责雇员行整行不存在 → 兜底新建。角色 key 取自选项表反查（ZP），非硬编码 ER。
+        tx, raw = _make_transaction(cs_code="CS001", sales_code="", role_texts=ROLE_TEXTS_ZP)
+        diffs: list[str] = []
+        tx._edit_partners(_make_order(), diffs)
+
+        self.assertEqual(raw.findById(_parvw_id(5)).key, "ZP")
+        self.assertEqual(raw.findById(_partner_id(5)).text, "CS001")
+        self.assertEqual(diffs, ["Primary CS:角色 (空)→ZP", "Primary CS:(空)→CS001"])
+
     def test_missing_employee_row_falls_back_to_key_guess(self):
-        # 负责雇员行整行不存在 → 走兜底分支，凭推断 key 新建；ER 被拒时记待校正不写脏数据。
-        tx, raw = _make_transaction(cs_code="CS001", sales_code="", invalid_keys=frozenset({"ER"}))
+        # 选项表不可用 → 只能用被实机否决的 ER 兜底；被拒时记待校正，绝不写脏数据。
+        tx, raw = _make_transaction(
+            cs_code="CS001", sales_code="",
+            invalid_keys=frozenset({"ER"}), entries_available=False,
+        )
         diffs: list[str] = []
         tx._edit_partners(_make_order(), diffs)
 
@@ -475,16 +571,69 @@ class PrimaryCsRoleKeyTest(unittest.TestCase):
         self.assertEqual(diffs, ["Primary CS:角色key ER 无效(待校正)"])
 
 
-class FindEmployeeRowTest(unittest.TestCase):
-    def test_matches_by_display_text_not_key(self):
-        preset = {_parvw_id(2): _combo("ZP", {"ZP": "负责雇员"})}
+class LookupRoleKeyTest(unittest.TestCase):
+    """显示文本 → PARVW key 的反查：唯一命中才采信。"""
+
+    def test_unique_text_resolves_to_key(self):
+        tx, _ = _make_transaction(role_texts=ROLE_TEXTS_ZP)
+        self.assertEqual(
+            tx._lookup_role_key(_parvw_id(0), OrderEditTransaction._EMPLOYEE_TEXTS), "ZP",
+        )
+
+    def test_ambiguous_text_returns_none(self):
+        # "送达方"同时对应 WE 与 ZG → 歧义，弃权而不是猜一个。
+        tx, _ = _make_transaction(role_texts=ROLE_TEXTS_AMBIGUOUS)
+        self.assertIsNone(tx._lookup_role_key(_parvw_id(0), frozenset({"送达方"})))
+
+    def test_entries_unavailable_returns_none(self):
+        tx, _ = _make_transaction(entries_available=False)
+        self.assertIsNone(
+            tx._lookup_role_key(_parvw_id(0), OrderEditTransaction._EMPLOYEE_TEXTS),
+        )
+
+
+class ResolveGpcRowTest(unittest.TestCase):
+    """GPC 行定位：已有 ZG 行优先，且命中时不再改角色。"""
+
+    def test_existing_zg_row_wins_without_key_change(self):
+        # ZG 被 SAP 排到行 8（不在 4/5）→ 仍命中，且返回 None 表示不必改角色。
+        # 这正是 `GPC Code:角色key ZG 无效(待校正)` 的根因场景。
+        preset = {_parvw_id(8): _combo("ZG")}
         tx, _ = _make_transaction(preset)
+        self.assertEqual(tx._resolve_gpc_row(PARTNER_PREFIX), (8, None))
+
+    def test_falls_back_to_create_row_with_key(self):
+        # 无 ZG 行 → 落创建同源行位（负责雇员在行 4 → GPC 落行 5）并改角色。
+        tx, _ = _make_transaction(_sap_determined_rows())
+        self.assertEqual(tx._resolve_gpc_row(PARTNER_PREFIX), (5, "ZG"))
+
+    def test_existing_zg_row_skips_set_key_entirely(self):
+        # 端到端：ZG 行已在行 8 且角色列只读，仍能把 Buyer 编码写进去（零 set_key）。
+        preset = {_parvw_id(8): _combo("ZG")}
+        tx, raw = _make_transaction(preset, sales_code="", invalid_keys=frozenset({"ZG"}))
+        diffs: list[str] = []
+        tx._edit_partners(_make_order("GP001"), diffs)
+
+        self.assertEqual(raw.findById(_partner_id(8)).text, "GP001")
+        self.assertEqual(diffs, ["GPC Code:(空)→GP001"])
+
+
+class FindEmployeeRowTest(unittest.TestCase):
+    def test_matches_by_key_resolved_from_entries(self):
+        preset = {_parvw_id(2): _combo("ZP", ROLE_TEXTS_ZP)}
+        tx, _ = _make_transaction(preset, role_texts=ROLE_TEXTS_ZP)
+        self.assertEqual(tx._find_employee_row(PARTNER_PREFIX), 2)
+
+    def test_falls_back_to_display_text_without_entries(self):
+        # 选项表不可用 → 退回显示文本扫描，老环境行为不回归。
+        preset = {_parvw_id(2): _combo("ZP", ROLE_TEXTS_ZP)}
+        tx, _ = _make_transaction(preset, role_texts=ROLE_TEXTS_ZP, entries_available=False)
         self.assertEqual(tx._find_employee_row(PARTNER_PREFIX), 2)
 
     def test_returns_none_when_absent(self):
         tx, _ = _make_transaction(_sap_determined_rows(employee_at_four=False))
         # _sap_determined_rows 用 ER→"负责雇员"，此处换成全非雇员行验证未命中。
-        tx2, _ = _make_transaction({_parvw_id(0): _combo("AG", {"AG": "售达方"})})
+        tx2, _ = _make_transaction({_parvw_id(0): _combo("AG")})
         self.assertIsNone(tx2._find_employee_row(PARTNER_PREFIX, max_rows=3))
         self.assertIsNotNone(tx._find_employee_row(PARTNER_PREFIX))
 

@@ -157,3 +157,25 @@ pyinstaller --onefile --windowed --clean --noconfirm --icon=Sap_Operate_Logo.ico
 - 测试文件放在 `test/` 目录
 - UI 文件由 Qt Designer 生成，不手动编辑 `*_Ui.py`
 - 字段映射通过 `Excel_Field_Mapper.py` 的映射表维护
+
+## 批量流程硬约束（基本原则，不可违反）
+
+**主程序的批量创建/编辑流程绝不允许死循环。** 批量流程跑在主线程（靠
+`QApplication.processEvents()` 刷 UI，无 QThread 承载 SAP 任务），一旦卡住：UI 冻结、
+关窗无响应、SAP 会话不释放、log 停在半截，用户只能强杀进程且 SAP 侧可能留下半成品订单。
+
+改动 `odmDataToSap` / `_edit_order_row` / `hourOperate` / `orderUnlockOrLock` 或
+`sap/transactions/` 内任何循环时，交付前逐条自检：
+
+1. **终止条件确定** — `while` 必须有硬上限。参考 `_sum_item_net_values(max_rows=200)`、
+   `read_plan_cost_rows(max_rows=50)`：上限只作防跑飞，正常靠遇空行退出，撞上限须
+   置 `result.warning` 告警而非静默少算。新增循环优先写成 `for`。
+2. **可被用户中止** — 外层批量循环每轮开头检查 `_is_sap_cancel_requested()`，在**订单边界**
+   `break`（SAP 侧不留半成品单）。`closeEvent` 检测到任务运行中一律 `event.ignore()` +
+   置中止标志，**绝不直接 accept**（窗口销毁后循环仍在跑会崩在 `textBrowser.append`）。
+3. **不无限重试/等待** — SAP 弹窗、状态轮询、重连一律设轮数上限，超限即失败返回，
+   禁止 `while True` 等 SAP 就绪。
+4. **不无限增长** — 跳过/新增判定不能让同一条数据每轮重复新增（如 item 号已存在但
+   物料不同必须跳过，否则 item 每轮增长）。
+5. **异常不回退到重跑同一行** — per-row `except` 内必须 `continue`，不得 retry；
+   并写入 `Update Time`，否则出错行与"根本没轮到的行"在 log 里无法区分。
