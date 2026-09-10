@@ -136,6 +136,23 @@ class _ComboElement(_Element):
         self._entries_available = entries_available
         super().__init__(key=key)
 
+    def rebind(
+        self,
+        role_texts: dict[str, str],
+        invalid_keys: frozenset[str],
+        silent_keys: frozenset[str],
+        entries_available: bool,
+    ) -> None:
+        """对齐到会话级选项表——真实 SAP 里同屏各行共享同一张 PARVW 系统配置表。
+
+        `_combo()` 造桩时会话尚不存在，拿不到本用例的选项表，故由 `_RawSession` 事后统一
+        绑定；否则 preset 行与 SAP 自动补出的行会看到两张不同的选项表，与实机不符。
+        """
+        self._role_texts = role_texts
+        self._invalid_keys = invalid_keys
+        self._silent_keys = silent_keys
+        self._entries_available = entries_available
+
     @property
     def Entries(self) -> _ComboEntries:
         # 老版 SAP GUI 无此属性：用 AttributeError 模拟，验证生产代码的兜底路径。
@@ -181,10 +198,9 @@ class _RawSession:
         self._entries_available = entries_available
         for element in self._cache.values():
             if isinstance(element, _ComboElement):
-                element._role_texts = self._role_texts
-                element._invalid_keys = invalid_keys
-                element._silent_keys = silent_keys
-                element._entries_available = entries_available
+                element.rebind(
+                    self._role_texts, invalid_keys, silent_keys, entries_available
+                )
 
     def findById(self, element_id: str) -> _Element:
         if element_id not in self._cache:
